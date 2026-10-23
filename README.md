@@ -253,6 +253,25 @@ On **http://tosslist.local**, under **Store order and rules**:
 
 ---
 
+## Undo a scan
+
+Scanned something you meant to keep? Two ways to take it back:
+
+- **The undo card.** Open **http://tosslist.local**, tap **undo card**
+  (above Recent scans), and print it or download it. Scanning it right after
+  a mistake removes that scan from Todoist and the Walmart list. Scanning it
+  again undoes the scan before that, going back up to 24 hours. Tape it to
+  the scanner or the trash can.
+- **The Undo button** next to each recent scan on the settings page. No PIN
+  needed.
+
+Fred Meyer doesn't let apps remove cart items, so for those, Recent scans
+reminds you to remove it in the Fred Meyer app. A scan still waiting for
+the internet is simply cancelled. If Todoist can't be reached, the light
+blinks 5 times; scan Undo again later and it finishes only what's left.
+
+---
+
 ## Alerts in Todoist
 
 Tosslist has no screen, so when something needs a person it adds a task to
