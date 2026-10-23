@@ -1,7 +1,8 @@
 # Tosslist — Setup Guide
 
 Scan an item as it goes in the trash. A few seconds later it shows up on a
-shared Todoist list that you and your partner both see.
+shared Todoist list that you and your partner both see, in your Fred Meyer
+cart, or both. You choose on the settings page.
 
 Plan on about 45 minutes the first time. You need: the Raspberry Pi, its power
 supply, the microSD card, the OTG adapter, the barcode scanner, and a computer
@@ -100,15 +101,73 @@ tap **Share** → invite their email. They need a free Todoist account.
 
 ---
 
+## Optional — Send scans to your Fred Meyer cart (15 min)
+
+Tosslist uses Kroger's official API (Fred Meyer is part of Kroger). It
+matches the exact product you scanned at your store, adds it to your cart, and
+shows the price. You still review the cart and check out in the Fred Meyer
+app, because the API can't place orders.
+
+**Your password stays private.** You sign in on Fred Meyer's own page, and
+Tosslist only gets a key that can look up products and add to your cart.
+
+### A. Register a Kroger developer app
+
+1. Go to **developer.kroger.com** and create an account (separate from your
+   Fred Meyer shopping account).
+2. Register a new application. Use any name, like *Tosslist*.
+3. Choose the **Production** environment if it asks.
+4. For **Redirect URI**, enter exactly:
+   `http://tosslist.local/kroger/callback`
+5. Turn on the **Products**, **Cart** and **Locations** APIs if it asks
+   which ones you need.
+6. Save it. Copy the **Client ID** and **Client secret**.
+
+If the portal won't accept that Redirect URI, use
+`http://localhost:8000/callback` instead. See the note in step B.
+
+### B. Connect it on tosslist.local
+
+1. Open **http://tosslist.local** and fill in **Fred Meyer app details**:
+   Client ID, Client secret, and Pickup or Delivery. If you used the
+   `localhost` Redirect URI, open **Redirect URI** and change it to match.
+   Tap **Save**.
+2. Tap **Connect Fred Meyer account**, sign in with your normal Fred Meyer
+   login, and approve.
+   - With the `tosslist.local` address, you land back on the settings page.
+   - With the `localhost` address, you'll land on a page that won't load.
+     That's expected. Copy that page's full address from the address bar,
+     go back to tosslist.local, open **"Sign-in page didn't load
+     afterwards?"**, paste it in, and tap **Finish connecting**.
+3. Under **Fred Meyer store**, enter your ZIP, tap **Find stores**, pick
+   yours, and tap **Use this store**.
+4. Under **Where scans go**, check **Fred Meyer cart**. Leave **Todoist list**
+   checked for both, or uncheck it for the cart only. Tap **Save**.
+
+### Good to know
+
+- **Each scan adds one.** Scan two empty milk jugs and the cart gets two.
+  Kroger doesn't let apps see the cart, so Tosslist can't skip duplicates
+  there the way it does in Todoist.
+- **"Not sold at your store"** in Recent scans means Fred Meyer doesn't carry
+  that exact product. It still goes to Todoist if that's on.
+- **"May have been added, check cart"** means the internet dropped right as
+  the item was sent. Tosslist doesn't resend it, so it can't be added twice.
+  Glance at your cart.
+- **Prices** in Recent scans are your store's price, including the sale
+  price when there is one.
+
+---
+
 ## What the green light means
 
 | Light | Meaning |
 |---|---|
 | Solid on | Ready to scan |
-| 2 quick blinks | Added to the list |
+| 2 quick blinks | Added (to Todoist, your cart, or both) |
 | 1 long blink | No internet right now. Saved, and it sends automatically later |
 | 5 fast blinks | Problem: open http://tosslist.local to see what happened |
-| Slow pulse | Setup mode (see below), or Todoist isn't set up yet |
+| Slow pulse | Setup mode (see below), or nowhere to send scans yet |
 
 The settings page also shows your **recent scans**, which is the easiest way
 to see what the device did.
@@ -136,6 +195,18 @@ reconnects on its own.
 Unplugging it is safe. Both programs start automatically on every power-up,
 settings are saved carefully so a sudden power cut can't half-write them, and
 anything scanned while offline is kept and sent once the internet is back.
+
+---
+
+## Updating Tosslist
+
+When there's a new version on GitHub, SSH in (Step 5) and run:
+
+```
+cd ~/tosslist && git pull && sudo bash install.sh
+```
+
+Your settings, Todoist token and Fred Meyer connection are kept.
 
 ---
 
@@ -173,11 +244,13 @@ same patterns as the light.
 
 | File | What it does |
 |---|---|
-| `scanner.py` | Reads the scanner, looks up the product name, adds it to Todoist |
+| `scanner.py` | Reads the scanner, looks up the product, sends it where you chose |
+| `kroger.py` | The Fred Meyer connection: sign-in, store search, prices, cart |
 | `setup_portal.py` | The settings page and the WiFi setup mode |
 | `common.py` | Shared pieces: saving settings, the offline queue, the light |
 | `install.sh` | One-time installer |
 | `systemd/` | Tells the Pi to start both programs on every power-up |
+| `tests/` | Checks that run on any computer: `python3 tests/test_tosslist.py` |
 
 Product names come from **Open Food Facts** (open database, ODbL license) and
-**UPCitemdb**'s free tier.
+**UPCitemdb**'s free tier. Fred Meyer data comes from the **Kroger Public API**.

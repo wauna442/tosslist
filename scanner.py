@@ -1,5 +1,6 @@
-"""Tosslist: reads the USB barcode scanner, looks up the product name,
-and adds it to a shared Todoist list.
+"""Tosslist: reads the USB barcode scanner, looks up the product, and sends
+it to a shared Todoist list, your Fred Meyer cart, or both (your choice on
+tosslist.local).
 
 Runs as a background service (tosslist.service) and restarts itself
 if anything goes wrong.
@@ -13,6 +14,7 @@ import uuid
 import requests
 
 import common
+import kroger
 
 log = logging.getLogger("tosslist")
 
@@ -187,13 +189,22 @@ class TodoistClient:
 
 # ---------- what happens on each scan ----------
 
-def send_item(item, cfg, client):
-    """Look up (if needed) and add one scanned item. Returns 'added' or
-    'duplicate'. Raises on network / auth problems."""
-    name = item.get("name")
-    if not name:
+LABELS = {"todoist": "Todoist", "kroger": "Fred Meyer"}
+RESULT_TEXT = {
+    "added": "added",
+    "duplicate": "already on list",
+    "not_found": "not sold at your store",
+    "maybe": "may have been added, check cart",
+    "auth": "sign-in problem, check settings",
+}
+
+
+def _todoist(item, cfg, todoist_factory):
+    client = (todoist_factory or TodoistClient)(cfg["todoist_token"])
+    if not item.get("name"):
         name = lookup_product(item["barcode"], client.session)
-        item["name"] = name or f"Unknown item {item['barcode']}"
+        item["name"] = (name or item.get("kroger_name")
+                        or f"Unknown item {item['barcode']}")
     pid = client.project_id(cfg["project_name"])
     if cfg.get("skip_duplicates", True):
         if item["name"].strip().lower() in client.open_task_names(pid):
@@ -203,53 +214,101 @@ def send_item(item, cfg, client):
     return "added"
 
 
-def handle_scan(barcode, feedback, client_factory=None):
+def _kroger_send(item, cfg, kroger_factory):
+    client = (kroger_factory or kroger.KrogerClient)(cfg)
+    product = client.find_product(item["barcode"], cfg["kroger_location_id"])
+    if product is None:
+        return "not_found"
+    item["kroger_name"], item["price"] = product["name"], product["price"]
+    try:
+        client.add_to_cart(product["upc"], 1, cfg.get("kroger_modality", "PICKUP"))
+    except requests.ReadTimeout:
+        # The request went out but no answer came back. Kroger can't tell us
+        # what's in the cart, and resending could add it twice.
+        return "maybe"
+    return "added"
+
+
+def send_item(item, cfg, todoist_factory=None, kroger_factory=None):
+    """Send one scan to each destination still pending for it.
+    Records results in item["results"]. Raises requests.RequestException
+    (no internet) with the unfinished destinations left in item["pending"]."""
+    item.setdefault("pending", ["todoist"])     # items queued by older versions
+    results = item.setdefault("results", {})
+    for dest in ("kroger", "todoist"):          # Fred Meyer first: it can supply the name
+        if dest not in item["pending"]:
+            continue
+        try:
+            if dest == "kroger":
+                results[dest] = _kroger_send(item, cfg, kroger_factory)
+            else:
+                results[dest] = _todoist(item, cfg, todoist_factory)
+        except (TodoistAuthError, kroger.KrogerAuthError) as e:
+            log.error("%s: %s", LABELS[dest], e)
+            results[dest] = "auth"
+        item["pending"].remove(dest)
+    if not item.get("name"):
+        item["name"] = item.get("kroger_name")
+    return results
+
+
+def summarize(item):
+    parts = []
+    for dest in ("todoist", "kroger"):
+        if dest in item.get("results", {}):
+            text = f"{LABELS[dest]}: {RESULT_TEXT[item['results'][dest]]}"
+            if dest == "kroger" and item.get("price") and item["results"][dest] in ("added", "maybe"):
+                text += f" (${item['price']:.2f})"
+            parts.append(text)
+    for dest in item.get("pending", []):
+        parts.append(f"{LABELS[dest]}: waiting for internet")
+    return " · ".join(parts)
+
+
+def handle_scan(barcode, feedback, todoist_factory=None, kroger_factory=None):
     cfg = common.load_config()
     entry = {"time": time.strftime("%Y-%m-%d %H:%M"), "barcode": barcode}
-    if not common.is_configured(cfg):
-        log.warning("Scanned %s but the device isn't set up yet", barcode)
-        entry["result"] = "not set up"
+    dests = common.destinations(cfg)
+    if not dests:
+        log.warning("Scanned %s but no destination is set up yet", barcode)
+        entry["result"] = "not set up: open the settings page"
         common.record_recent(entry)
         feedback.error()
         return "not configured"
 
-    item = {"id": str(uuid.uuid4()), "barcode": barcode, "name": None}
-    client = (client_factory or TodoistClient)(cfg["todoist_token"])
+    item = {"id": str(uuid.uuid4()), "barcode": barcode, "name": None,
+            "pending": list(dests), "results": {}}
     try:
-        result = send_item(item, cfg, client)
-        log.info("%s: %s (%s)", barcode, item["name"], result)
-        entry.update(name=item["name"], result=result)
-        feedback.success()
-    except TodoistAuthError:
-        log.error("Todoist token is wrong or expired")
-        entry.update(name=item.get("name"), result="bad Todoist token")
-        feedback.error()
-        result = "auth error"
+        results = send_item(item, cfg, todoist_factory, kroger_factory)
+        if any(r in ("added", "duplicate", "maybe") for r in results.values()):
+            feedback.success()
+        else:
+            feedback.error()
+        outcome = "done"
     except requests.RequestException as e:
         log.warning("No internet (%s); saved %s for later", e, barcode)
         common.queue_add(item)
-        entry.update(name=item.get("name"), result="saved, will send later")
         feedback.queued()
-        result = "queued"
+        outcome = "queued"
+    entry.update(name=item.get("name") or item.get("kroger_name"),
+                 result=summarize(item))
+    log.info("%s: %s (%s)", barcode, entry["name"], entry["result"])
     common.record_recent(entry)
-    return result
+    return outcome
 
 
-def retry_queue_once(client_factory=None):
-    """Try to send anything saved while offline. Returns how many sent."""
+def retry_queue_once(todoist_factory=None, kroger_factory=None):
+    """Try to send anything saved while offline. Returns how many finished."""
     cfg = common.load_config()
-    if not common.is_configured(cfg):
-        return 0
     pending = common.queue_take_all()
     if not pending:
         return 0
-    client = (client_factory or TodoistClient)(cfg["todoist_token"])
     sent = 0
     for i, item in enumerate(pending):
         try:
-            send_item(item, cfg, client)
+            send_item(item, cfg, todoist_factory, kroger_factory)
             sent += 1
-        except (requests.RequestException, TodoistAuthError):
+        except requests.RequestException:
             for rest in pending[i:]:
                 common.queue_add(rest)
             break

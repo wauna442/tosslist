@@ -18,7 +18,7 @@ apt-get install -y python3-evdev python3-flask python3-requests \
 
 echo "==> Copying the program to $APP"
 mkdir -p "$APP" /var/lib/tosslist
-cp "$SRC"/common.py "$SRC"/scanner.py "$SRC"/setup_portal.py "$APP"/
+cp "$SRC"/*.py "$APP"/
 chmod 700 /var/lib/tosslist   # keeps your Todoist token private
 
 echo "==> Making the setup page pop up automatically on phones"

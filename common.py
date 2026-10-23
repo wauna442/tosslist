@@ -5,6 +5,7 @@ Everything the device remembers lives in /var/lib/tosslist:
   queue.json   - scans waiting to be sent while the internet is down
   cache.json   - barcode -> product name, so repeat items skip the lookup
   recent.json  - last few scans, shown on the settings page
+  kroger_token.json - the Fred Meyer sign-in key (never your password)
 """
 
 import json
@@ -18,12 +19,23 @@ CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 QUEUE_PATH = os.path.join(DATA_DIR, "queue.json")
 CACHE_PATH = os.path.join(DATA_DIR, "cache.json")
 RECENT_PATH = os.path.join(DATA_DIR, "recent.json")
+KROGER_TOKEN_PATH = os.path.join(DATA_DIR, "kroger_token.json")
 
 DEFAULT_CONFIG = {
+    # where each scan goes: either or both
+    "send_to_todoist": True,
+    "send_to_kroger": False,
     "todoist_token": "",
     "project_name": "Grocery List",
     "skip_duplicates": True,   # don't add an item that's already on the list
     "buzzer_pin": None,        # GPIO number if you add a buzzer later, e.g. 18
+    # Fred Meyer (Kroger API app you register at developer.kroger.com)
+    "kroger_client_id": "",
+    "kroger_client_secret": "",
+    "kroger_redirect_uri": "http://tosslist.local/kroger/callback",
+    "kroger_location_id": "",
+    "kroger_location_name": "",
+    "kroger_modality": "PICKUP",   # or DELIVERY
 }
 
 log = logging.getLogger("tosslist")
@@ -73,9 +85,32 @@ def save_config(updates):
         return cfg
 
 
-def is_configured(cfg=None):
-    cfg = cfg or load_config()
+def todoist_ready(cfg):
     return bool(cfg.get("todoist_token")) and bool(cfg.get("project_name"))
+
+
+def kroger_connected(cfg):
+    return (bool(cfg.get("kroger_client_id")) and bool(cfg.get("kroger_client_secret"))
+            and os.path.exists(KROGER_TOKEN_PATH))
+
+
+def kroger_ready(cfg):
+    return kroger_connected(cfg) and bool(cfg.get("kroger_location_id"))
+
+
+def destinations(cfg=None):
+    """Where a scan made right now should go: "todoist", "kroger", or both."""
+    cfg = cfg or load_config()
+    out = []
+    if cfg.get("send_to_todoist") and todoist_ready(cfg):
+        out.append("todoist")
+    if cfg.get("send_to_kroger") and kroger_ready(cfg):
+        out.append("kroger")
+    return out
+
+
+def is_configured(cfg=None):
+    return bool(destinations(cfg))
 
 
 # ---------- offline queue ----------
