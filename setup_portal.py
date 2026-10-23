@@ -9,6 +9,10 @@ settings, choosing where scans go (Todoist, Fred Meyer cart, or both),
 connecting Fred Meyer, and seeing recent scans.
 """
 
+import functools
+import hashlib
+import hmac
+import json
 import logging
 import os
 import secrets
@@ -17,8 +21,9 @@ import threading
 import time
 
 import requests
-from flask import Flask, redirect, render_template_string, request
+from flask import Flask, Response, redirect, render_template_string, request, session
 
+import barcode
 import common
 import kroger
 import walmart
@@ -45,6 +50,216 @@ state = {
 _net_lock = threading.Lock()
 feedback = None
 app = Flask(__name__)
+# Settings cookie: never sent with requests started by other websites.
+app.config.update(SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_HTTPONLY=True)
+
+
+def _secret_key():
+    key = None
+    try:
+        with open(common.SECRET_PATH) as f:
+            key = f.read().strip()
+    except OSError:
+        pass
+    if not key:
+        key = secrets.token_hex(32)
+        common.write_private(common.SECRET_PATH, key)
+    return key
+
+
+app.secret_key = _secret_key()
+
+
+# ---------- PIN for settings (issue #11) ----------
+#
+# Everyday use (recent scans, the Walmart list) stays open. Changing settings
+# needs the PIN. The PIN is stored only as a salted PBKDF2 hash. A printed
+# reset card, scanned on the device itself, clears a forgotten PIN.
+
+PIN_ITERATIONS = 100_000
+UNLOCK_MINUTES = 30
+MAX_TRIES = 5
+LOCKOUT_SECONDS = 300
+RESET_PREFIX = "TOSSLIST-RESET-"
+_RESET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O or 1/I mix-ups
+state.update(pin_fails=0, pin_locked_until=0.0)
+
+
+def pin_info():
+    return common.read_json(common.PIN_PATH, None)
+
+
+def _pin_hash(pin, salt, iterations):
+    return hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt),
+                               iterations).hex()
+
+
+def valid_pin(pin):
+    return pin.isdigit() and 4 <= len(pin) <= 8
+
+
+def set_pin(pin):
+    info = pin_info() or {}
+    salt = secrets.token_hex(16)
+    reset = info.get("reset_code") or RESET_PREFIX + "".join(
+        secrets.choice(_RESET_ALPHABET) for _ in range(8))
+    new = {"salt": salt, "iterations": PIN_ITERATIONS,
+           "hash": _pin_hash(pin, salt, PIN_ITERATIONS),
+           "reset_code": reset, "version": secrets.token_hex(8)}
+    common.write_private(common.PIN_PATH, json.dumps(new))
+    return new
+
+
+def check_pin(pin):
+    info = pin_info()
+    if not info or not valid_pin(pin):
+        return False
+    return hmac.compare_digest(_pin_hash(pin, info["salt"], info["iterations"]),
+                               info["hash"])
+
+
+def unlocked():
+    info = pin_info()
+    return bool(info) and session.get("pin_version") == info["version"] \
+        and session.get("until", 0) > time.time()
+
+
+def _unlock_session(info):
+    session["pin_version"] = info["version"]
+    session["until"] = time.time() + UNLOCK_MINUTES * 60
+
+
+def require_unlocked(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        if not unlocked():
+            state["error"] = ("Create a PIN first." if not pin_info()
+                              else "Enter your PIN to change settings.")
+            return redirect("/")
+        return fn(*a, **kw)
+    return wrapper
+
+
+@app.route("/pin/create", methods=["POST"])
+def pin_create():
+    if pin_info():
+        return redirect("/")
+    pin, pin2 = request.form.get("pin", ""), request.form.get("pin2", "")
+    if not valid_pin(pin):
+        state["error"] = "Use 4 to 8 digits for the PIN."
+    elif pin != pin2:
+        state["error"] = "The two PINs didn't match. Try again."
+    else:
+        _unlock_session(set_pin(pin))
+        state["message"] = ("PIN created. Next, print the PIN reset card (in the "
+                            "PIN section below) and keep it somewhere safe.")
+    return redirect("/")
+
+
+@app.route("/pin/unlock", methods=["POST"])
+def pin_unlock():
+    now = time.time()
+    if now < state["pin_locked_until"]:
+        mins = int((state["pin_locked_until"] - now) // 60) + 1
+        state["error"] = f"Too many wrong tries. Try again in {mins} minute{'s' if mins > 1 else ''}."
+        return redirect("/")
+    if check_pin(request.form.get("pin", "")):
+        state["pin_fails"] = 0
+        _unlock_session(pin_info())
+    else:
+        state["pin_fails"] += 1
+        if state["pin_fails"] >= MAX_TRIES:
+            state["pin_fails"] = 0
+            state["pin_locked_until"] = now + LOCKOUT_SECONDS
+            state["error"] = "Too many wrong tries. Try again in 5 minutes."
+            log.warning("Settings PIN locked after %d wrong tries", MAX_TRIES)
+        else:
+            state["error"] = "That PIN isn't right."
+    return redirect("/")
+
+
+@app.route("/pin/lock", methods=["POST"])
+def pin_lock():
+    session.clear()
+    return redirect("/")
+
+
+@app.route("/pin/change", methods=["POST"])
+@require_unlocked
+def pin_change():
+    pin, pin2 = request.form.get("new_pin", ""), request.form.get("new_pin2", "")
+    if not valid_pin(pin):
+        state["error"] = "Use 4 to 8 digits for the PIN."
+    elif pin != pin2:
+        state["error"] = "The two PINs didn't match. Try again."
+    else:
+        _unlock_session(set_pin(pin))
+        state["message"] = "PIN changed."
+    return redirect("/")
+
+
+CARD_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title><style>
+ body { margin:0; background:#fff; color:#111; font:16px/1.45 -apple-system, system-ui, sans-serif; }
+ main { max-width:520px; margin:0 auto; padding:20px 16px; }
+ .card { border:2px dashed #999; border-radius:12px; padding:18px; text-align:center; }
+ .card svg { display:block; width:100%; height:110px; margin:10px 0 4px; }
+ .code { font:600 1rem ui-monospace, Menlo, monospace; letter-spacing:.04em; }
+ h1 { font-size:1.3rem; margin:0 0 6px; } p { margin:8px 0; }
+ .actions { display:flex; gap:10px; margin-top:16px; }
+ .actions a, .actions button { flex:1; padding:12px; border-radius:10px; font:inherit; font-weight:600;
+   text-align:center; text-decoration:none; border:1px solid #2f7d4f; background:#2f7d4f; color:#fff; }
+ .actions a.quiet { background:#fff; color:#2f7d4f; }
+ @media print { .actions, .back { display:none; } main { padding:0; max-width:7in; }
+   .card svg { height:1.1in; } }
+</style></head><body><main>
+<p class="back"><a href="/">← Back to settings</a></p>
+<div class="card">
+ <h1>{{ title }}</h1>
+ {{ svg|safe }}
+ <p class="code">{{ caption }}</p>
+ {% for line in lines %}<p>{{ line }}</p>{% endfor %}
+</div>
+<div class="actions">
+ <button onclick="window.print()">Print</button>
+ <a class="quiet" href="{{ download }}" download>Download</a>
+</div>
+</main></body></html>"""
+
+
+def card_page(title, code, caption, lines, download):
+    """A printable card. The SVG is built by barcode.svg from our own codes."""
+    return render_template_string(CARD_PAGE, title=title,
+                                  svg=barcode.svg(code, label=caption, stretch=True),
+                                  caption=caption, lines=lines, download=download)
+
+
+def svg_download(svg, filename):
+    return Response(svg, mimetype="image/svg+xml",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.route("/pin/reset-card")
+@require_unlocked
+def pin_reset_card():
+    code = pin_info()["reset_code"]
+    return card_page("Tosslist PIN reset", code, "Tosslist PIN reset",
+                     ["Forgot the settings PIN? Scan this card with Tosslist's scanner. "
+                      "The PIN is cleared, and the next visit to the settings page "
+                      "asks for a new one.",
+                      "Keep it somewhere safe, away from the device: anyone with this "
+                      "card and the scanner can reset the PIN."],
+                     "/pin/reset-card.svg")
+
+
+@app.route("/pin/reset-card.svg")
+@require_unlocked
+def pin_reset_card_svg():
+    return svg_download(barcode.svg(pin_info()["reset_code"], label="Tosslist PIN reset"),
+                        "tosslist-pin-reset.svg")
+
+
 
 
 # ---------- talking to NetworkManager (nmcli) ----------
@@ -333,6 +548,32 @@ PAGE = """<!doctype html>
 </div>
 {% endif %}
 
+{% if not pin_set %}
+<div class="card">
+ <h2>Create a PIN</h2>
+ <p class="hint" style="margin-top:0">A PIN keeps guests on your WiFi from changing
+ Tosslist's settings. Scanning, recent scans and the Walmart list stay open to everyone.</p>
+ <form method="post" action="/pin/create">
+  <label for="pin">New PIN (4 to 8 digits)</label>
+  <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password" required>
+  <label for="pin2">Same PIN again</label>
+  <input id="pin2" name="pin2" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password" required>
+  <button style="margin-top:14px">Create PIN</button>
+ </form>
+</div>
+{% elif not unlocked %}
+<div class="card">
+ <h2>Settings are locked</h2>
+ <form method="post" action="/pin/unlock">
+  <label for="unlock_pin" style="margin-top:0">PIN</label>
+  <input id="unlock_pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="current-password" required autofocus>
+  <button style="margin-top:12px">Unlock settings</button>
+ </form>
+ <p class="hint">Forgot it? Scan your printed PIN reset card with Tosslist's scanner.</p>
+</div>
+{% endif %}
+
+{% if unlocked %}
 <form method="post" action="/save">
  <div class="card">
   {% if hotspot %}
@@ -550,6 +791,23 @@ PAGE = """<!doctype html>
 </div>
 {% endif %}
 
+<div class="card">
+ <h2>PIN</h2>
+ <p class="hint" style="margin-top:0">Settings stay unlocked on this device for {{ unlock_minutes }} minutes.</p>
+ <form method="post" action="/pin/lock"><button class="quiet">Lock settings now</button></form>
+ <a class="btn" href="/pin/reset-card">Print the PIN reset card</a>
+ <details style="margin-top:14px"><summary>Change PIN</summary>
+  <form method="post" action="/pin/change">
+   <label for="new_pin">New PIN (4 to 8 digits)</label>
+   <input id="new_pin" name="new_pin" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password" required>
+   <label for="new_pin2">Same PIN again</label>
+   <input id="new_pin2" name="new_pin2" type="password" inputmode="numeric" pattern="[0-9]*" autocomplete="new-password" required>
+   <button style="margin-top:12px">Change PIN</button>
+  </form>
+ </details>
+</div>
+{% endif %}
+
 {% if recent %}
 <div class="card" style="margin-top:14px">
  <h2>Recent scans</h2>
@@ -593,6 +851,7 @@ def index():
         kroger_location_id=cfg.get("kroger_location_id", ""),
         stores=state["stores"], zip=state["zip"],
         data_warning=common.DATA_WARNING,
+        pin_set=bool(pin_info()), unlocked=unlocked(), unlock_minutes=UNLOCK_MINUTES,
         version=common.app_file("VERSION", "unknown"),
         read_only=common.read_only_active(),
         update_status=common.read_json(common.UPDATE_STATUS_PATH, None),
@@ -620,6 +879,7 @@ def index():
 
 
 @app.route("/save", methods=["POST"])
+@require_unlocked
 def save():
     f = request.form
     updates = {"skip_duplicates": f.get("skip_duplicates") == "1"}
@@ -708,6 +968,7 @@ def save():
 # ---------- Fred Meyer sign-in and store picker ----------
 
 @app.route("/kroger/connect")
+@require_unlocked
 def kroger_connect():
     cfg = common.load_config()
     if not (cfg.get("kroger_client_id") and cfg.get("kroger_client_secret")):
@@ -744,6 +1005,7 @@ def _finish_connect(code, key):
 
 
 @app.route("/kroger/callback")
+@require_unlocked
 def kroger_callback():
     if request.args.get("error"):
         state["error"] = "Fred Meyer sign-in was cancelled or refused."
@@ -752,12 +1014,14 @@ def kroger_callback():
 
 
 @app.route("/kroger/paste", methods=["POST"])
+@require_unlocked
 def kroger_paste():
     code, key = kroger.code_from_pasted_url(request.form.get("url", ""))
     return _finish_connect(code, key)
 
 
 @app.route("/kroger/disconnect", methods=["POST"])
+@require_unlocked
 def kroger_disconnect():
     kroger.disconnect()
     state["message"] = "Fred Meyer disconnected."
@@ -765,6 +1029,7 @@ def kroger_disconnect():
 
 
 @app.route("/kroger/stores", methods=["POST"])
+@require_unlocked
 def kroger_stores():
     z = request.form.get("zip", "").strip()
     state["zip"] = z
@@ -785,6 +1050,7 @@ def kroger_stores():
 
 
 @app.route("/kroger/store", methods=["POST"])
+@require_unlocked
 def kroger_store():
     sid = request.form.get("store_id", "")
     match = next((st for st in state["stores"] if st["id"] == sid), None)
@@ -826,6 +1092,7 @@ def start_update():
 
 
 @app.route("/update/now", methods=["POST"])
+@require_unlocked
 def update_now():
     if start_update():
         state["message"] = ("Checking for updates. If there's a new release, the Pi "
@@ -840,6 +1107,7 @@ def update_now():
 # ---------- Walmart ----------
 
 @app.route("/walmart/key", methods=["POST"])
+@require_unlocked
 def walmart_key():
     if walmart.has_key() and request.form.get("replace") != "1":
         return redirect("/")
@@ -850,6 +1118,7 @@ def walmart_key():
 
 
 @app.route("/walmart/check", methods=["POST"])
+@require_unlocked
 def walmart_check():
     cfg = common.load_config()
     if not common.walmart_ready(cfg):

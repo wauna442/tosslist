@@ -435,8 +435,33 @@ def summarize(item):
     return text
 
 
+CARD_PREFIX = "TOSSLIST-"
+
+
+def handle_card(code, feedback):
+    """Tosslist's own printed cards. Returns True if `code` was one; such
+    codes are never sent to a store or list."""
+    if not code.upper().startswith(CARD_PREFIX):
+        return False
+    entry = {"time": time.strftime("%Y-%m-%d %H:%M"), "barcode": code}
+    info = common.read_json(common.PIN_PATH, None)
+    if info and code.upper() == info.get("reset_code", "").upper():
+        common.remove_file(common.PIN_PATH)
+        log.info("Settings PIN cleared with the reset card")
+        entry.update(name="PIN reset card",
+                     result="Settings PIN cleared. Open the settings page to create a new one.")
+        feedback.success()
+    else:
+        entry.update(name="Tosslist card", result="Not recognized (an old or unknown card)")
+        feedback.error()
+    common.record_recent(entry)
+    return True
+
+
 def handle_scan(barcode, feedback, todoist_factory=None, kroger_factory=None,
                 walmart_factory=None):
+    if handle_card(barcode, feedback):
+        return "card"
     cfg = common.load_config()
     entry = {"time": time.strftime("%Y-%m-%d %H:%M"), "barcode": barcode}
     dests = common.destinations(cfg)

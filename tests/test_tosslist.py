@@ -149,6 +149,20 @@ class FakeSession:
         raise AssertionError(path)
 
 
+TEST_PIN = "2468"
+
+
+def unlocked_client():
+    """A browser that has entered the settings PIN (creating it if needed)."""
+    c = setup_portal.app.test_client()
+    if not setup_portal.pin_info():
+        c.post("/pin/create", data={"pin": TEST_PIN, "pin2": TEST_PIN})
+    else:
+        c.post("/pin/unlock", data={"pin": TEST_PIN})
+    c.get("/")                                  # clear the confirmation message
+    return c
+
+
 def reset():
     for p in (common.CONFIG_PATH, common.QUEUE_PATH, common.CACHE_PATH, common.RECENT_PATH,
               common.KROGER_TOKEN_PATH, common.WALMART_BASKET_PATH):
@@ -232,7 +246,7 @@ def test_portal_pages():
     setup_portal.feedback = FakeFeedback()
     setup_portal.start_hotspot()
     assert setup_portal.state["hotspot"]
-    c = setup_portal.app.test_client()
+    c = unlocked_client()
     html = c.get("/").get_data(as_text=True)
     assert "Setup mode" in html and "Home" in html and "1. Your home WiFi" in html
     # phone captive-portal probes get redirected to the setup page
@@ -271,7 +285,7 @@ def test_portal_failed_wifi_restarts_hotspot():
 def test_portal_settings_mode_blank_token_keeps_old():
     reset(); common.save_config({"todoist_token": "keepme"})
     setup_portal.state["hotspot"] = False
-    c = setup_portal.app.test_client()
+    c = unlocked_client()
     html = c.get("/").get_data(as_text=True)
     assert "Saved ✓" in html and "Change WiFi network" in html
     r = c.post("/save", data={"token": "", "project": "Grocery List"})
@@ -406,7 +420,7 @@ def test_portal_kroger_flow():
         reset()
         common.save_config({"todoist_token": "t"})
         setup_portal.state.update(hotspot=False, stores=[], zip="", oauth={})
-        c = setup_portal.app.test_client()
+        c = unlocked_client()
         html = c.get("/").get_data(as_text=True)
         assert "Where scans go" in html and "Enter and save the Client ID" in html
         # connect before credentials -> friendly error
@@ -546,7 +560,7 @@ def test_portal_walmart():
         reset()
         common.save_config({"todoist_token": "t"})
         setup_portal.state.update(hotspot=False, stores=[], zip="", oauth={})
-        c = setup_portal.app.test_client()
+        c = unlocked_client()
         if os.path.exists(common.WALMART_KEY_PATH): os.remove(common.WALMART_KEY_PATH)
         _KEY_MADE.clear()
         html = c.get("/").get_data(as_text=True)
@@ -696,7 +710,7 @@ def test_sign_in_problem_moves_to_next_store():
 def test_portal_rules_card():
     s, scan, last = routing_setup("every")
     setup_portal.state.update(hotspot=False, stores=[], zip="", oauth={})
-    c = setup_portal.app.test_client()
+    c = unlocked_client()
     html = c.get("/").get_data(as_text=True)
     assert "Store order and rules" in html and "First in stock" in html
     assert html.index("1.</td>") < html.index("Fred Meyer<br>") < html.index("Walmart<br>")
@@ -983,7 +997,7 @@ def test_portal_updates_card():
     setup_portal.state.update(hotspot=False, stores=[], zip="", oauth={})
     common.write_json(common.UPDATE_STATUS_PATH, {"time": "2026-10-24 03:41", "result": "failed",
                                                   "message": "No internet.", "version": "v26.10.0"})
-    c = setup_portal.app.test_client()
+    c = unlocked_client()
     html = c.get("/").get_data(as_text=True)
     assert "Install new releases each night" in html and "No internet." in html
     assert 'name="auto_update" value="1"\n   checked' in html
@@ -1000,6 +1014,124 @@ def test_portal_updates_card():
         assert "find Tosslist" in c.get("/").get_data(as_text=True)
     finally:
         setup_portal.start_update = orig
+
+
+# ---------------- PIN for settings (issue #11) ----------------
+
+import barcode as barcode_mod
+
+
+def fresh_pin_state():
+    common.remove_file(common.PIN_PATH)
+    setup_portal.state.update(pin_fails=0, pin_locked_until=0.0, hotspot=False,
+                              stores=[], zip="", oauth={}, message="", error="")
+
+
+def test_barcode_structure():
+    w = barcode_mod.code128_modules("TOSSLIST-UNDO")
+    assert sum(w) == 11 * (len("TOSSLIST-UNDO") + 2) + 13     # start + data + check, then stop
+    svg = barcode_mod.svg("TOSSLIST-UNDO", label="Undo <last> scan")
+    assert svg.startswith("<svg") and "Undo &lt;last&gt; scan" in svg
+    stretched = barcode_mod.svg("TOSSLIST-UNDO", stretch=True)
+    assert 'preserveAspectRatio="none"' in stretched and "<text" not in stretched
+    try:
+        barcode_mod.code128_modules("caf\u00e9"); assert False
+    except ValueError:
+        pass
+
+
+def test_no_pin_yet_settings_hidden_everyday_use_open():
+    reset(); fresh_pin_state()
+    common.save_config({"todoist_token": "t"})
+    common.record_recent({"time": "t", "barcode": "1", "name": "Milk", "result": "Todoist: added"})
+    c = setup_portal.app.test_client()
+    html = c.get("/").get_data(as_text=True)
+    assert "Create a PIN" in html and "Where scans go" not in html and "Recent scans" in html
+    c.post("/save", data={"has_dest": "1"})                    # blocked
+    assert common.load_config()["send_to_todoist"] is True
+    assert "Create a PIN first" in c.get("/").get_data(as_text=True)
+    c.post("/pin/create", data={"pin": "12", "pin2": "12"})
+    assert "4 to 8 digits" in c.get("/").get_data(as_text=True)
+    c.post("/pin/create", data={"pin": "1234", "pin2": "1243"})
+    assert "match" in c.get("/").get_data(as_text=True)
+    c.post("/pin/create", data={"pin": "1357", "pin2": "1357"})
+    html = c.get("/").get_data(as_text=True)
+    assert "PIN created" in html and "Where scans go" in html and "Print the PIN reset card" in html
+    raw = open(common.PIN_PATH).read()
+    assert "1357" not in raw and oct(os.stat(common.PIN_PATH).st_mode)[-3:] == "600"
+    c.post("/pin/create", data={"pin": "9999", "pin2": "9999"})   # can't overwrite an existing PIN
+    assert setup_portal.check_pin("1357") and not setup_portal.check_pin("9999")
+
+
+def test_other_browsers_locked_wrong_tries_lock_out():
+    reset(); fresh_pin_state()
+    setup_portal.set_pin("1357")
+    c = setup_portal.app.test_client()
+    html = c.get("/").get_data(as_text=True)
+    assert "Settings are locked" in html and "Where scans go" not in html
+    for i in range(4):
+        c.post("/pin/unlock", data={"pin": "0000"})
+        assert "isn&#39;t right" in c.get("/").get_data(as_text=True)
+    c.post("/pin/unlock", data={"pin": "0000"})
+    assert "Too many wrong tries" in c.get("/").get_data(as_text=True)
+    c.post("/pin/unlock", data={"pin": "1357"})               # right PIN, but locked out
+    assert "Try again in 5 minutes" in c.get("/").get_data(as_text=True)
+    assert "Settings are locked" in c.get("/").get_data(as_text=True)
+    setup_portal.state["pin_locked_until"] = 0.0
+    c.post("/pin/unlock", data={"pin": "1357"})
+    assert "Where scans go" in c.get("/").get_data(as_text=True)
+    with c.session_transaction() as sess:                      # 30 minutes later
+        sess["until"] = time.time() - 1
+    assert "Settings are locked" in c.get("/").get_data(as_text=True)
+
+
+def test_protected_actions_need_the_pin():
+    reset(); fresh_pin_state()
+    setup_portal.set_pin("1357")
+    c = setup_portal.app.test_client()
+    for path in ["/save", "/kroger/disconnect", "/kroger/stores", "/kroger/store", "/walmart/key",
+                 "/walmart/check", "/update/now", "/pin/change"]:
+        r = c.post(path, data={"zip": "97266"})
+        assert r.status_code == 302 and r.location == "/", path
+    assert c.get("/kroger/connect").location == "/"
+    assert c.get("/pin/reset-card").location == "/"
+    # everyday actions stay open
+    walmart.basket_add({"item_id": "1", "name": "x", "price": 1.0}, "1")
+    c.post("/walmart/clear")
+    assert walmart.basket()["items"] == []
+
+
+def test_change_pin_lock_and_reset_card():
+    reset(); fresh_pin_state()
+    setup_portal.set_pin("1357")
+    phone, laptop = setup_portal.app.test_client(), setup_portal.app.test_client()
+    for b in (phone, laptop):
+        b.post("/pin/unlock", data={"pin": "1357"})
+    phone.post("/pin/change", data={"new_pin": "8642", "new_pin2": "8642"})
+    assert "PIN changed" in phone.get("/").get_data(as_text=True)
+    assert "Where scans go" in phone.get("/").get_data(as_text=True)      # this browser stays in
+    assert "Settings are locked" in laptop.get("/").get_data(as_text=True)  # others are signed out
+    assert setup_portal.check_pin("8642") and not setup_portal.check_pin("1357")
+    page = phone.get("/pin/reset-card").get_data(as_text=True)
+    assert "<svg" in page and "Print" in page and "keep it somewhere safe" in page.lower()
+    r = phone.get("/pin/reset-card.svg")
+    assert r.mimetype == "image/svg+xml" and "attachment" in r.headers["Content-Disposition"]
+    phone.post("/pin/lock")
+    assert "Settings are locked" in phone.get("/").get_data(as_text=True)
+
+
+def test_reset_card_scanned_on_device_clears_pin():
+    reset(); fresh_pin_state()
+    info = setup_portal.set_pin("1357")
+    assert info["reset_code"].startswith("TOSSLIST-RESET-") and len(info["reset_code"]) == 23
+    fb = FakeFeedback()
+    assert scanner.handle_scan("TOSSLIST-RESET-WRONGWRO", fb) == "card"
+    assert fb.calls == ["error"] and setup_portal.pin_info()
+    assert scanner.handle_scan(info["reset_code"], fb) == "card"
+    assert fb.calls == ["error", "success"] and setup_portal.pin_info() is None
+    assert "PIN cleared" in common.read_json(common.RECENT_PATH, [])[0]["result"]
+    assert "Create a PIN" in setup_portal.app.test_client().get("/").get_data(as_text=True)
+    assert setup_portal.app.config["SESSION_COOKIE_SAMESITE"] == "Lax"
 
 
 if __name__ == "__main__":
