@@ -16,6 +16,7 @@ import requests
 import common
 import alerts
 import kroger
+import teach
 import walmart
 
 log = logging.getLogger("tosslist")
@@ -107,6 +108,9 @@ def _upcitemdb_lookup(barcode, session):
 def lookup_product(barcode, session=None):
     """Returns a product name, or None if nobody knows this barcode.
     Raises requests.RequestException if there's no internet."""
+    taught = teach.get(barcode)              # you taught it a name (issue #9)
+    if taught:
+        return taught["name"]
     session = session or requests.Session()
     cache = common.read_json(common.CACHE_PATH, {})
     if barcode in cache:
@@ -267,13 +271,16 @@ class _Stores:
     def lookup(self, store, item):
         """Returns the product (or None) and records a check on the item:
         {"found", "in_stock" (True/False/None), "price"}."""
+        taught = teach.get(item["barcode"]) or {}
         if store == "kroger":
             product = self.client(store).find_product(
-                item["barcode"], self.cfg["kroger_location_id"])
+                item["barcode"], self.cfg["kroger_location_id"],
+                ids=[taught["kroger_upc"]] if taught.get("kroger_upc") else None)
             avail = kroger.in_stock(product, self.cfg.get("kroger_low_counts", True)) \
                 if product else None
         else:
-            product = self.client(store).find_product(item["barcode"])
+            product = self.client(store).find_product(
+                item["barcode"], item_id=taught.get("walmart_item_id"))
             avail = walmart.in_stock(product) if product else None
         item.setdefault("checks", {})[store] = {
             "found": product is not None, "in_stock": avail,
@@ -379,6 +386,9 @@ def send_item(item, cfg, todoist_factory=None, kroger_factory=None,
     the unfinished steps left in item["pending"]."""
     item.setdefault("pending", ["todoist"])     # items queued by older versions
     item.setdefault("rule", "every")
+    taught = teach.get(item["barcode"])
+    if taught and not item.get("name"):
+        item["name"] = taught["name"]
     results = item.setdefault("results", {})
     stores = _Stores(cfg, kroger_factory, walmart_factory)
     steps = [st for st in item["pending"] if st in STORES]

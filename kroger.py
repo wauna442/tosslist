@@ -212,11 +212,13 @@ class KrogerClient:
         return [s for s in stores if s["id"]]
 
     # -- products --
-    def find_product(self, barcode, location_id):
+    def find_product(self, barcode, location_id, ids=None):
         """Returns {"upc", "name", "price", "stock"} or None if not sold there.
         "stock" is Kroger's stock level at that store: "HIGH", "LOW",
-        "TEMPORARILY_OUT_OF_STOCK", or None if Kroger didn't say."""
-        cands = upc_candidates(barcode)
+        "TEMPORARILY_OUT_OF_STOCK", or None if Kroger didn't say.
+        ids: Kroger product IDs to use instead of the barcode (a taught item)."""
+        cands = [i for i in (ids or []) if i.isdigit() and len(i) == 13] \
+            or upc_candidates(barcode)
         if not cands:
             return None
         data = self._get("/products", {"filter.productId": ",".join(cands),
@@ -228,6 +230,23 @@ class KrogerClient:
                 return {"upc": c, "name": _product_name(p), "price": _price(p),
                         "stock": _stock(p)}
         return None
+
+    def search(self, term, location_id, limit=8):
+        """Products at your store matching some words (for teaching an item)."""
+        words = term.split()[:8]                 # Kroger allows at most 8 words
+        term = " ".join(words)
+        if len(term) < 3:
+            return []
+        data = self._get("/products", {"filter.term": term,
+                                       "filter.locationId": location_id,
+                                       "filter.limit": limit})
+        out = []
+        for p in data.get("data", []):
+            pid = p.get("productId") or p.get("upc")
+            if pid:
+                out.append({"upc": pid, "name": _product_name(p), "price": _price(p),
+                            "stock": _stock(p)})
+        return out
 
     # -- cart --
     def add_to_cart(self, upc, quantity=1, modality="PICKUP"):

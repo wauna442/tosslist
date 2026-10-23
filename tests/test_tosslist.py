@@ -9,7 +9,7 @@ os.environ["TOSSLIST_LOCK_DIR"] = tempfile.mkdtemp()   # not /run: tests run as 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import requests
-import common, scanner, setup_portal, kroger, walmart, alerts
+import common, scanner, setup_portal, kroger, walmart, alerts, teach
 
 
 class FakeFeedback:
@@ -51,6 +51,11 @@ class FakeSession:
             raise requests.ConnectionError("offline")
         if "openfoodfacts" in url:
             assert "User-Agent" in kw["headers"]
+            if "search.pl" in url:
+                if "oats" in kw["params"]["search_terms"].lower():
+                    return Resp(200, {"products": [{"product_name": "Rolled Oats", "brands": "Sunny Acres",
+                                                    "quantity": "42 oz"}, {"product_name": ""}]})
+                return Resp(200, {"products": []})
             if "0001" in url: return Resp(200, {"status": 1, "product": {"product_name": "Whole Milk", "brands": "Tillamook,Other"}})
             return Resp(404, {"status": 0})
         if "upcitemdb" in url:
@@ -102,12 +107,18 @@ class FakeSession:
         if h["WM_CONSUMER.ID"] != "wm-consumer" or self.bad_token:
             return Resp(401, {"error": "unknown consumer"})
         assert abs(int(h["WM_CONSUMER.INTIMESTAMP"]) - time.time() * 1000) < 60000
-        assert method == "GET" and path == "/items"
-        upc = kw["params"]["upc"]
-        catalog = {"011110417005": {"itemId": 10450114, "name": "Great Value 2% Milk, 1 gal", "salePrice": 3.12, "upc": upc},
+        assert method == "GET"
+        catalog = {"011110417005": {"itemId": 10450114, "name": "Great Value 2% Milk, 1 gal", "salePrice": 3.12, "upc": "011110417005"},
                    "042100005264": {"itemId": 55512, "name": "Small Soda 12 oz", "salePrice": 0.98},
                    "049000000443": {"itemId": 66601, "name": "Cola 2 Liter", "salePrice": 2.25, "stock": "Available"},
                    "078742370057": {"itemId": 77701, "name": "Bread 20 oz", "salePrice": 3.50, "stock": "Not available"}}
+        oats = {"itemId": 88801, "name": "Sunny Acres Rolled Oats, 42 oz", "salePrice": 4.48, "stock": "Available"}
+        if path == "/search":
+            return Resp(200, {"items": [oats] if "oats" in kw["params"]["query"].lower() else []})
+        if path.startswith("/items/"):
+            return Resp(200, oats) if path == "/items/88801" else Resp(404, {})
+        assert path == "/items"
+        upc = kw["params"]["upc"]
         if upc in catalog:
             return Resp(200, {"items": [catalog[upc]]})
         return Resp(400, {"errors": [{"code": 4002, "message": "Invalid UPC"}]})
@@ -137,7 +148,14 @@ class FakeSession:
         if path == "/products":
             assert h["Authorization"] == "Bearer app"
             assert kw["params"]["filter.locationId"] == "70100123"
+            oats = {"productId": "0001234500099", "description": "Sunny Acres Organic Rolled Oats",
+                    "items": [{"size": "42 oz", "price": {"regular": 5.29}, "inventory": {"stockLevel": "HIGH"}}]}
+            if "filter.term" in kw["params"]:
+                assert len(kw["params"]["filter.term"].split()) <= 8
+                return Resp(200, {"data": [oats] if "oats" in kw["params"]["filter.term"].lower() else []})
             ids = kw["params"]["filter.productId"].split(",")
+            if ids == ["0001234500099"]:
+                return Resp(200, {"data": [oats]})
             catalog = {
                 "0001111041700": {"productId": "0001111041700", "description": "Kroger 2% Milk",
                                   "items": [{"size": "1 gal", "price": {"regular": 3.49, "promo": 2.99}}]},
@@ -177,7 +195,7 @@ def unlocked_client():
 def reset():
     for p in (common.CONFIG_PATH, common.QUEUE_PATH, common.CACHE_PATH, common.RECENT_PATH,
               common.KROGER_TOKEN_PATH, common.WALMART_BASKET_PATH, common.UPDATE_STATUS_PATH,
-              alerts.PROBLEMS_PATH, alerts.ALERTS_PATH):
+              alerts.PROBLEMS_PATH, alerts.ALERTS_PATH, teach.TAUGHT_PATH):
         if os.path.exists(p): os.remove(p)
 
 
@@ -1345,6 +1363,112 @@ def test_undo_button_and_card_need_no_pin():
     assert "<svg" in page and "Undo last scan" in page
     r = c.get("/undo-card.svg")
     assert r.mimetype == "image/svg+xml" and "tosslist-undo.svg" in r.headers["Content-Disposition"]
+
+
+# ---------------- Teach an item (issue #9) ----------------
+
+JPEG = b"\xff\xd8\xff\xe0" + b"0" * 100
+
+
+def test_useful_lines_from_ocr_text():
+    text = "Sunny Acres\n\nOrganic Rolled Oats\nNET WT 42 OZ (2 LB 10 OZ) 1.19kg\n1234 5678 ||| %%\n~~\nsunny acres\n"
+    assert teach.useful_lines(text) == ["Organic Rolled Oats", "Sunny Acres", "NET WT 42 OZ 2 LB 10 OZ 1.19kg"]
+
+
+def test_read_photo_checks_input_and_uses_ram():
+    seen = []
+    orig = teach.run_ocr
+    teach.run_ocr = lambda path: (seen.append(path), "Organic Rolled Oats\nSunny Acres")[1]
+    try:
+        assert teach.read_photo(JPEG) == ["Organic Rolled Oats", "Sunny Acres"]
+        assert seen[0].startswith(os.path.join(common.LOCK_DIR, "photos")) and not os.path.exists(seen[0])
+        for bad in (b"not an image at all", b"\xff\xd8\xff" + b"0" * (teach.MAX_PHOTO_BYTES + 1)):
+            try:
+                teach.read_photo(bad); assert False
+            except ValueError:
+                pass
+        assert teach.read_photo(b"") == []
+    finally:
+        teach.run_ocr = orig
+
+
+def teach_world():
+    s, scan, last = routing_setup("every", todoist=True)
+    common.save_config({"routing_rule": "every"})
+    orig = (kroger.requests.Session, walmart.requests.Session, teach.requests.Session)
+    kroger.requests.Session = walmart.requests.Session = teach.requests.Session = lambda: s
+    return s, scan, last, orig
+
+
+def restore_sessions(orig):
+    kroger.requests.Session, walmart.requests.Session, teach.requests.Session = orig
+
+
+def test_search_everywhere():
+    s, scan, last, orig = teach_world()
+    try:
+        r = teach.search_everywhere("Sunny Acres Organic Rolled Oats", common.load_config())
+        assert r["off"] == [{"name": "Sunny Acres Rolled Oats (42 oz)"}]
+        assert r["kroger"][0]["upc"] == "0001234500099" and r["kroger"][0]["price"] == 5.29
+        assert r["walmart"][0]["item_id"] == "88801" and r["problems"] == []
+        assert teach.search_everywhere("ab", common.load_config())["problems"] == ["Type at least 3 letters to search."]
+        s.offline_hosts.add("openfoodfacts")
+        assert "Couldn't reach Open Food Facts." in teach.search_everywhere("oats", common.load_config())["problems"]
+    finally:
+        restore_sessions(orig)
+
+
+def test_taught_item_is_used_by_every_destination():
+    s, scan, last, orig = teach_world()
+    try:
+        scan("0099887766")                                       # unknown everywhere
+        assert s.tasks[-1]["content"] == "Unknown item 0099887766" and s.cart == []
+        teach.remember("0099887766", "Sunny Acres Rolled Oats", "0001234500099", "88801")
+        scan("0099887766")
+        assert s.tasks[-1]["content"] == "Sunny Acres Rolled Oats"
+        assert s.cart[-1][1]["upc"] == "0001234500099"                    # the product you picked
+        assert walmart.basket()["items"][-1]["item_id"] == "88801"
+        assert teach.forget("0099887766") and not teach.forget("0099887766")
+        assert scanner.lookup_product("0099887766", s) is None
+    finally:
+        restore_sessions(orig)
+
+
+def test_teach_pages_end_to_end():
+    s, scan, last, orig = teach_world()
+    orig_ocr = teach.run_ocr
+    teach.run_ocr = lambda path: "SUNNY ACRES\nOrganic Rolled Oats\nNET WT 42 OZ"
+    try:
+        scan("0099887766")
+        fresh_pin_state(); setup_portal.set_pin("1357")
+        c = setup_portal.app.test_client()                       # no PIN needed to teach
+        assert 'href="/teach?barcode=0099887766"' in c.get("/").get_data(as_text=True)
+        page = c.get("/teach?barcode=0099887766").get_data(as_text=True)
+        assert "Take a photo" in page and 'capture="environment"' in page and "Fred Meyer and Walmart" in page
+        import io
+        page = c.post("/teach/photo", data={"barcode": "0099887766", "name": "",
+                                             "photo": (io.BytesIO(JPEG), "p.jpg")},
+                      content_type="multipart/form-data").get_data(as_text=True)
+        assert ">Organic Rolled Oats</button>" in page and 'value="Organic Rolled Oats SUNNY ACRES"' in page
+        page = c.post("/teach/photo", data={"barcode": "0099887766",
+                                             "photo": (io.BytesIO(b"hello"), "p.txt")},
+                      content_type="multipart/form-data").get_data(as_text=True)
+        assert "look like a photo" in page
+        page = c.post("/teach/search", data={"barcode": "0099887766", "q": "Sunny Acres Organic Rolled Oats"}).get_data(as_text=True)
+        assert 'value="0001234500099"' in page and 'value="88801"' in page and "Rolled Oats (42 oz)" in page
+        c.post("/teach/save", data={"barcode": "0099887766", "name": "Oats",
+                                    "kroger_upc": "0001234500099", "walmart_item_id": "88801"})
+        assert "matched at Fred Meyer and Walmart" in c.get("/").get_data(as_text=True)
+        assert teach.get("0099887766")["kroger_upc"] == "0001234500099"
+        page = c.post("/teach/save", data={"barcode": "0099887766", "name": "  "}).get_data(as_text=True)
+        assert "Type a name" in page
+        c.post("/teach/save", data={"barcode": "../../etc", "name": "x"})
+        assert "doesn&#39;t look right" in c.get("/").get_data(as_text=True)
+        c.post("/teach/forget", data={"barcode": "0099887766"})
+        assert teach.get("0099887766") is None
+    finally:
+        teach.run_ocr = orig_ocr
+        restore_sessions(orig)
 
 
 if __name__ == "__main__":

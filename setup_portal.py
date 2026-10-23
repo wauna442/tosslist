@@ -28,6 +28,7 @@ import barcode
 import common
 import kroger
 import scanner
+import teach
 import walmart
 
 log = logging.getLogger("tosslist")
@@ -53,7 +54,8 @@ _net_lock = threading.Lock()
 feedback = None
 app = Flask(__name__)
 # Settings cookie: never sent with requests started by other websites.
-app.config.update(SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_HTTPONLY=True)
+app.config.update(SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_HTTPONLY=True,
+                  MAX_CONTENT_LENGTH=10 * 1024 * 1024)   # photo uploads (issue #9)
 
 
 def _secret_key():
@@ -525,6 +527,8 @@ PAGE = """<!doctype html>
    border-radius:10px; background:var(--accent); color:#fff; font-weight:600; margin-top:10px; }
  button.quiet { background:transparent; color:var(--muted); border:1px solid var(--line); }
  button:disabled { opacity:.3; }
+ a.quiet-link { display:inline-block; padding:6px 10px; margin-bottom:4px; border:1px solid var(--line);
+   border-radius:10px; color:var(--muted); text-decoration:none; font-weight:600; font-size:.9rem; }
  .row { display:flex; gap:8px; } .row > * { flex:1; }
 </style></head><body><main>
 <h1>Tosslist</h1>
@@ -824,7 +828,9 @@ PAGE = """<!doctype html>
  {% if queued %}<p class="hint">{{ queued }} waiting for internet.</p>{% endif %}
  <table>{% for r in recent %}<tr><td class="t">{{ r.time }}</td>
   <td>{{ r.name or r.barcode }}<br><span class="hint">{{ r.result }}</span></td>
-  <td style="width:1%">{% if r.kind == "scan" and r.id and not r.undone and r.ts and now - r.ts < undo_window %}
+  <td style="width:1%;white-space:nowrap">{% if r.kind == "scan" and r.barcode %}
+   <a class="quiet-link" href="/teach?barcode={{ r.barcode|urlencode }}">Teach</a>{% endif %}
+   {% if r.kind == "scan" and r.id and not r.undone and r.ts and now - r.ts < undo_window %}
    <form method="post" action="/undo"><input type="hidden" name="id" value="{{ r.id }}">
     <button class="quiet" style="margin:0;padding:6px 10px;width:auto">Undo</button></form>{% endif %}</td></tr>
  {% endfor %}</table>
@@ -1132,6 +1138,213 @@ def undo_card():
 def undo_card_svg():
     return svg_download(barcode.svg(scanner.UNDO_CODE, label="Tosslist: undo last scan"),
                         "tosslist-undo.svg")
+
+
+# ---------- Teach an item (issue #9) — open to everyone, like undo ----------
+
+TEACH_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Teach an item · Tosslist</title><style>
+ :root { --bg:#f6f5f1; --card:#fff; --ink:#1f2328; --muted:#5b6370;
+         --accent:#2f7d4f; --line:#dedbd2; --bad:#b3261e; }
+ @media (prefers-color-scheme: dark) {
+  :root { --bg:#16181b; --card:#1f2226; --ink:#eceae4; --muted:#a2a8b1;
+          --accent:#5cc488; --line:#33373d; --bad:#f2827a; } }
+ body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.45 -apple-system, system-ui, sans-serif; }
+ main { max-width:520px; margin:0 auto; padding:20px 16px 48px; }
+ h1 { font-size:1.35rem; margin:4px 0 2px; } h2 { font-size:1.05rem; margin:0 0 8px; }
+ .sub, .hint { color:var(--muted); } .hint { font-size:.88rem; }
+ .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+ label { display:block; font-weight:600; margin:12px 0 4px; }
+ input[type=text], input[type=search] { width:100%; box-sizing:border-box; padding:11px; font-size:16px;
+   border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); }
+ button, .btn { display:block; width:100%; box-sizing:border-box; margin-top:10px; padding:13px; font-size:1rem;
+   font-weight:600; border:0; border-radius:10px; background:var(--accent); color:#fff; text-align:center; text-decoration:none; }
+ button.quiet { background:transparent; color:var(--muted); border:1px solid var(--line); }
+ .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:6px; }
+ .chips button { display:inline-block; width:auto; margin:0; padding:7px 12px; font-size:.92rem;
+   background:transparent; color:var(--ink); border:1px solid var(--line); font-weight:500; }
+ .opt { display:flex; gap:10px; align-items:flex-start; padding:8px 0; border-top:1px solid var(--line); font-weight:400; margin:0; }
+ .opt input { margin-top:4px; } .opt span { color:var(--muted); font-size:.88rem; display:block; }
+ .ok { color:var(--accent); font-weight:600; } .bad { color:var(--bad); font-weight:600; }
+ a { color:var(--accent); }
+</style></head><body><main>
+<p><a href="/">← Back</a></p>
+<h1>Teach an item</h1>
+<p class="sub">Barcode {{ barcode }}{% if current %} · now known as <b>{{ current.name }}</b>{% endif %}</p>
+{% if error %}<div class="card bad">{{ error }}</div>{% endif %}
+
+<div class="card">
+ <h2>1. Read the package</h2>
+ <p class="hint" style="margin-top:0">Take a photo of the front of the package. The Pi reads the
+ words on it; the photo isn't kept or sent anywhere.</p>
+ <form id="photoform" method="post" action="/teach/photo" enctype="multipart/form-data">
+  <input type="hidden" name="barcode" value="{{ barcode }}">
+  <input type="hidden" name="name" value="{{ name }}">
+  <input id="photo" type="file" name="photo" accept="image/*" capture="environment" style="display:none">
+  <button type="button" onclick="document.getElementById('photo').click()">Take a photo</button>
+ </form>
+ <p id="reading" class="hint" style="display:none">Reading the text… this can take up to a minute.</p>
+ {% if lines %}
+ <label>Words found — tap to use</label>
+ <div class="chips">{% for l in lines %}<button type="button" onclick="useText(this.textContent)">{{ l }}</button>{% endfor %}</div>
+ {% elif photo_read %}<p class="hint">No words could be read. Try again closer, with good light.</p>{% endif %}
+</div>
+
+<form method="post" action="/teach/search" class="card">
+ <h2>2. Search</h2>
+ <input type="hidden" name="barcode" value="{{ barcode }}">
+ <input type="hidden" name="name" value="{{ name }}">
+ <label for="q" style="margin-top:0">Words to search for</label>
+ <input id="q" type="search" name="q" value="{{ query }}" placeholder="e.g. Sunny Acres rolled oats" autocomplete="off">
+ <button>Search{% if stores %} Open Food Facts, {{ stores }}{% else %} Open Food Facts{% endif %}</button>
+ <p class="hint">Can't read it? Search the web for the barcode:
+  <a href="https://www.google.com/search?q={{ barcode|urlencode }}" target="_blank" rel="noopener">{{ barcode }}</a>,
+  or point Google Lens (in your phone's camera app) at the package, then type what it finds.</p>
+</form>
+
+<form method="post" action="/teach/save" class="card">
+ <h2>3. Save</h2>
+ <input type="hidden" name="barcode" value="{{ barcode }}">
+ {% for p in problems %}<p class="bad" style="font-weight:400">{{ p }}</p>{% endfor %}
+ {% if results %}
+  {% if results.off %}<label>Name ideas (Open Food Facts)</label>
+   <div class="chips">{% for r in results.off %}<button type="button" onclick="useName(this.textContent)">{{ r.name }}</button>{% endfor %}</div>{% endif %}
+  {% if results.kroger is not none and show_kroger %}<label>Which Fred Meyer product is it?</label>
+   {% for r in results.kroger %}<label class="opt"><input type="radio" name="kroger_upc" value="{{ r.upc }}" onchange="maybeName('{{ loop.index0 }}k')">
+    <div id="{{ loop.index0 }}k">{{ r.name }}<span>{% if r.price %}${{ "%.2f"|format(r.price) }}{% endif %}{% if r.stock == "TEMPORARILY_OUT_OF_STOCK" %} · out of stock{% endif %}</span></div></label>
+   {% else %}<p class="hint">Nothing found at Fred Meyer for those words.</p>{% endfor %}
+   <label class="opt"><input type="radio" name="kroger_upc" value="" checked><div>None of these</div></label>{% endif %}
+  {% if results.walmart is not none and show_walmart %}<label>Which Walmart product is it?</label>
+   {% for r in results.walmart %}<label class="opt"><input type="radio" name="walmart_item_id" value="{{ r.item_id }}" onchange="maybeName('{{ loop.index0 }}w')">
+    <div id="{{ loop.index0 }}w">{{ r.name }}<span>{% if r.price %}${{ "%.2f"|format(r.price) }}{% endif %}</span></div></label>
+   {% else %}<p class="hint">Nothing found at Walmart for those words.</p>{% endfor %}
+   <label class="opt"><input type="radio" name="walmart_item_id" value="" checked><div>None of these</div></label>{% endif %}
+ {% endif %}
+ <label for="name">Name on your list</label>
+ <input id="name" type="text" name="name" value="{{ name }}" maxlength="120" required>
+ <button>Save</button>
+ <p class="hint">From now on, scanning this barcode uses this name{% if stores %} and the
+ product you picked{% endif %}.</p>
+</form>
+
+{% if current %}
+<form method="post" action="/teach/forget"><input type="hidden" name="barcode" value="{{ barcode }}">
+ <button class="quiet">Forget what I taught for this barcode</button></form>
+{% endif %}
+
+<script>
+function useText(t) { var q = document.getElementById('q'); q.value = q.value ? q.value + ' ' + t : t;
+  var n = document.getElementById('name'); if (!n.value) n.value = t; }
+function useName(t) { document.getElementById('name').value = t; }
+function maybeName(id) { var n = document.getElementById('name');
+  if (!n.value) n.value = document.getElementById(id).firstChild.textContent.trim(); }
+// Shrink the photo on the phone before uploading: faster to send and to read.
+document.getElementById('photo').addEventListener('change', function () {
+  var input = this, file = input.files && input.files[0], form = document.getElementById('photoform');
+  if (!file) return;
+  document.getElementById('reading').style.display = 'block';
+  var send = function () { form.submit(); };
+  try {
+    var img = new Image(), url = URL.createObjectURL(file);
+    img.onload = function () {
+      var scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+      var c = document.createElement('canvas');
+      c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      c.toBlob(function (blob) {
+        try { var dt = new DataTransfer();
+              dt.items.add(new File([blob], 'photo.jpg', {type: 'image/jpeg'}));
+              input.files = dt.files; } catch (e) {}
+        send();
+      }, 'image/jpeg', 0.85);
+    };
+    img.onerror = send; img.src = url;
+  } catch (e) { send(); }
+});
+</script>
+</main></body></html>"""
+
+
+def _teach_page(barcode, **extra):
+    cfg = common.load_config()
+    current = teach.get(barcode)
+    stores = " and ".join(n for n, ok in (("Fred Meyer", common.kroger_ready(cfg)),
+                                         ("Walmart", common.walmart_ready(cfg))) if ok)
+    values = dict(barcode=barcode, current=current, lines=[], photo_read=False,
+                  query="", name=(current or {}).get("name", ""), results=None,
+                  problems=[], error="", stores=stores,
+                  show_kroger=common.kroger_ready(cfg), show_walmart=common.walmart_ready(cfg))
+    values.update({k: v for k, v in extra.items() if v is not None})
+    return render_template_string(TEACH_PAGE, **values)
+
+
+def _teach_barcode():
+    code = teach.clean_barcode(request.values.get("barcode", ""))
+    if not code:
+        state["error"] = "That barcode doesn't look right."
+    return code
+
+
+@app.route("/teach")
+def teach_page():
+    code = _teach_barcode()
+    return _teach_page(code) if code else redirect("/")
+
+
+@app.route("/teach/photo", methods=["POST"])
+def teach_photo():
+    code = _teach_barcode()
+    if not code:
+        return redirect("/")
+    f = request.files.get("photo")
+    try:
+        lines = teach.read_photo(f.read() if f else b"")
+    except ValueError as e:
+        return _teach_page(code, error=str(e), name=request.form.get("name"))
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        log.error("Reading a photo failed: %s", e)
+        return _teach_page(code, error="Couldn't read that photo. Try again, or type the words.",
+                           name=request.form.get("name"))
+    return _teach_page(code, lines=lines, photo_read=True,
+                       query=" ".join(lines[:2]), name=request.form.get("name"))
+
+
+@app.route("/teach/search", methods=["POST"])
+def teach_search():
+    code = _teach_barcode()
+    if not code:
+        return redirect("/")
+    q = teach.clean_name(request.form.get("q", ""))
+    results = teach.search_everywhere(q, common.load_config())
+    return _teach_page(code, query=q, results=results, problems=results["problems"],
+                       name=request.form.get("name"))
+
+
+@app.route("/teach/save", methods=["POST"])
+def teach_save():
+    code = _teach_barcode()
+    if not code:
+        return redirect("/")
+    try:
+        entry = teach.remember(code, request.form.get("name", ""),
+                               request.form.get("kroger_upc") or None,
+                               request.form.get("walmart_item_id") or None)
+    except ValueError:
+        return _teach_page(code, error="Type a name for this item.")
+    extra = [n for n, k in (("Fred Meyer", "kroger_upc"), ("Walmart", "walmart_item_id"))
+             if entry.get(k)]
+    state["message"] = (f"Saved: {code} is now “{entry['name']}”"
+                        + (f", matched at {' and '.join(extra)}" if extra else "") + ".")
+    return redirect("/")
+
+
+@app.route("/teach/forget", methods=["POST"])
+def teach_forget():
+    code = _teach_barcode()
+    if code and teach.forget(code):
+        state["message"] = f"Forgot what was taught for {code}."
+    return redirect("/")
 
 
 # ---------- Updates (issue #12) ----------
