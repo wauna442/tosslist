@@ -3,8 +3,9 @@ Fred Meyer (Kroger), Walmart, the product databases and the WiFi controls.
 
 Run with:  python3 tests/test_tosslist.py
 """
-import os, sys, tempfile, time
+import json, os, sys, tempfile, time
 os.environ["TOSSLIST_DATA_DIR"] = tempfile.mkdtemp()
+os.environ["TOSSLIST_LOCK_DIR"] = tempfile.mkdtemp()   # not /run: tests run as a normal user
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import requests
@@ -716,6 +717,233 @@ def test_default_is_unchanged_behavior():
     assert common.DEFAULT_CONFIG["routing_rule"] == "every"
     assert common.DEFAULT_CONFIG["todoist_when"] == "always"
     assert common.DEFAULT_CONFIG["kroger_low_counts"] is True
+
+
+# ---------------- Read-only mode and the install/update scripts (issue #7) ----------------
+
+import shutil, subprocess
+REPO_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+
+
+def test_writable_unlocks_only_in_read_only_mode():
+    calls = []
+    orig = (common.DATA_DIR, common._remount)
+    common._remount = lambda mode: calls.append(mode)
+    try:
+        with common.writable():                # normal mode: nothing to unlock
+            pass
+        assert calls == []
+        common.DATA_DIR = common.LOWER_ROOT + "/var/lib/tosslist"
+        with common.writable():
+            with common.writable():            # nested: still one unlock
+                assert calls == ["rw"]
+        assert calls == ["rw", "ro"]
+        # if locking again fails for a while, it keeps trying
+        fails = [1, 1]
+        def flaky(mode):
+            calls.append(mode)
+            if mode == "ro" and fails:
+                fails.pop(); raise subprocess.CalledProcessError(32, "mount")
+        common._remount = flaky
+        orig_sleep = common.time.sleep; common.time.sleep = lambda s: None
+        with common.writable():
+            pass
+        common.time.sleep = orig_sleep
+        assert calls[-4:] == ["rw", "ro", "ro", "ro"]
+    finally:
+        common.DATA_DIR, common._remount = orig
+
+
+def test_read_only_detection():
+    d = tempfile.mkdtemp()
+    with open(os.path.join(d, "cmdline"), "w") as f:
+        f.write("overlayroot=tmpfs console=serial0,115200 root=PARTUUID=x rootwait")
+    orig = common.PROC_CMDLINE
+    try:
+        common.PROC_CMDLINE = os.path.join(d, "cmdline"); assert common.read_only_active()
+        with open(common.PROC_CMDLINE, "w") as f: f.write("console=tty1 root=PARTUUID=x")
+        assert not common.read_only_active()
+        common.PROC_CMDLINE = os.path.join(d, "missing"); assert not common.read_only_active()
+    finally:
+        common.PROC_CMDLINE = orig
+
+
+def test_wifi_profile_saved_to_real_disk():
+    d = tempfile.mkdtemp()
+    profile = os.path.join(d, "etc/NetworkManager/system-connections/Home.nmconnection")
+    os.makedirs(os.path.dirname(profile)); open(profile, "w").write("[wifi]\nssid=Home\n")
+    lower = os.path.join(d, "lower")
+    def fake_run(cmd, timeout=60):
+        if "GENERAL.CONNECTION" in cmd: return 0, "GENERAL.CONNECTION:Home\n"
+        if "NAME,FILENAME" in cmd: return 0, f"Home:{profile}\ntosslist-setup:/x\n"
+        return 0, ""
+    orig = (setup_portal.run, common.PROC_CMDLINE, common.LOWER_ROOT)
+    try:
+        setup_portal.run = fake_run
+        open(os.path.join(d, "cmdline"), "w").write("console=tty1")
+        common.PROC_CMDLINE = os.path.join(d, "cmdline")
+        assert setup_portal.persist_wifi_profile() is False          # not in read-only mode
+        open(common.PROC_CMDLINE, "w").write("overlayroot=tmpfs console=tty1")
+        common.LOWER_ROOT = lower
+        assert setup_portal.persist_wifi_profile() is False          # not a system-connections path
+        # point the "system" path into our temp dir by faking the prefix check
+        real = "/etc/NetworkManager/system-connections/Home.nmconnection"
+        setup_portal.run = lambda cmd, timeout=60: (
+            (0, "GENERAL.CONNECTION:Home\n") if "GENERAL.CONNECTION" in cmd else
+            (0, f"Home:{real}\n") if "NAME,FILENAME" in cmd else (0, ""))
+        import builtins
+        orig_open = builtins.open
+        builtins.open = lambda f, *a, **k: orig_open(profile if f == real else f, *a, **k)
+        try:
+            assert setup_portal.persist_wifi_profile() is True
+        finally:
+            builtins.open = orig_open
+        saved = lower + real
+        assert open(saved).read() == "[wifi]\nssid=Home\n"
+        assert oct(os.stat(saved).st_mode)[-3:] == "600"
+    finally:
+        setup_portal.run, common.PROC_CMDLINE, common.LOWER_ROOT = orig
+
+
+class ScriptWorld:
+    """A fake Pi for the shell scripts: a fake GitHub (bare repo) with
+    releases, the device's clone, a boot partition and a data folder.
+    System-changing commands are only recorded (TOSSLIST_DRY_RUN)."""
+
+    def __init__(self, read_only):
+        self.d = tempfile.mkdtemp()
+        self.origin = os.path.join(self.d, "origin.git")
+        work = os.path.join(self.d, "work")
+        self.repo = os.path.join(self.d, "tosslist")
+        self.fw = os.path.join(self.d, "boot"); os.makedirs(self.fw)
+        self.data = os.path.join(self.d, "data")
+        self.log = os.path.join(self.d, "dry.log"); open(self.log, "w").close()
+        self.cmdline = os.path.join(self.d, "cmdline")
+        self.set_read_only(read_only)
+        g = lambda *a, cwd=work: subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@t",
+                                                 *a], cwd=cwd, check=True, capture_output=True)
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.origin], check=True)
+        os.makedirs(work)
+        g("init", "-q", "-b", "main")
+        shutil.copy(os.path.join(REPO_ROOT, "update.sh"), work)
+        shutil.copytree(os.path.join(REPO_ROOT, "scripts"), os.path.join(work, "scripts"))
+        # stand-in installer: records that it ran
+        open(os.path.join(work, "install.sh"), "w").write(
+            '#!/bin/bash\necho "install.sh $*" >> "$TOSSLIST_DRY_RUN"\n')
+        for n, tag in ((1, "v26.1.0"), (2, "v26.2.0"), (3, None)):
+            open(os.path.join(work, "version.txt"), "w").write(str(n))
+            g("add", "-A"); g("commit", "-q", "-m", f"change {n}")
+            if tag: g("tag", tag)
+        g("push", "-q", self.origin, "main", "--tags")
+        subprocess.run(["git", "clone", "-q", self.origin, self.repo], check=True)
+        subprocess.run(["git", "-C", self.repo, "checkout", "-q", "--detach", "v26.1.0"], check=True)
+
+    def set_read_only(self, on):
+        open(self.cmdline, "w").write(("overlayroot=tmpfs " if on else "") + "console=tty1 rootwait")
+
+    def env(self):
+        e = dict(os.environ, TOSSLIST_DRY_RUN=self.log, PROC_CMDLINE=self.cmdline, FW_DIR=self.fw,
+                 TOSSLIST_DATA_DIR=self.data)
+        return e
+
+    def run(self, script, *args):
+        return subprocess.run(["bash", script, *args], env=self.env(), capture_output=True, text=True)
+
+    def logged(self):
+        return open(self.log).read().splitlines()
+
+    def version(self):
+        return open(os.path.join(self.repo, "version.txt")).read()
+
+    def status(self):
+        return json.load(open(os.path.join(self.data, "update-status.json")))
+
+
+def test_update_in_read_only_mode_restarts_then_resumes():
+    w = ScriptWorld(read_only=True)
+    r = w.run(os.path.join(w.repo, "update.sh"))
+    assert r.returncode == 0, r.stderr
+    assert w.logged() == ["raspi-config nonint disable_overlayfs", "systemctl reboot"]
+    assert w.version() == "1"                                    # nothing changed yet
+    marker = os.path.join(w.fw, "tosslist-resume")
+    assert open(marker).read() == f"{w.repo}/update.sh\n--release\n"
+    # ...the Pi restarts with read-only mode off, and resume.sh picks it up
+    w.set_read_only(False)
+    r = w.run(os.path.join(w.repo, "scripts", "resume.sh"))
+    assert r.returncode == 0, r.stderr
+    assert not os.path.exists(marker)
+    assert w.version() == "2"                                    # newest release, not main
+    assert w.logged()[-1] == "install.sh --resumed"
+
+
+def test_update_with_read_only_off_installs_directly():
+    w = ScriptWorld(read_only=False)
+    r = w.run(os.path.join(w.repo, "update.sh"), "--main")
+    assert r.returncode == 0, r.stderr
+    assert w.version() == "3" and w.logged() == ["install.sh "]
+
+
+def test_update_nothing_new_and_never_backwards():
+    w = ScriptWorld(read_only=True)
+    subprocess.run(["git", "-C", w.repo, "checkout", "-q", "--detach", "v26.2.0"], check=True)
+    r = w.run(os.path.join(w.repo, "update.sh"))
+    assert "Up to date" in r.stdout and w.logged() == [] and w.status()["result"] == "current"
+    subprocess.run(["git", "-C", w.repo, "checkout", "-q", "-B", "main", "origin/main"], check=True)
+    r = w.run(os.path.join(w.repo, "update.sh"))                 # on main, ahead of the release
+    assert "ahead of v26.2.0" in r.stdout and w.version() == "3" and w.logged() == []
+
+
+def test_update_check_only():
+    w = ScriptWorld(read_only=True)
+    r = w.run(os.path.join(w.repo, "update.sh"), "--check")
+    assert "Update available: v26.2.0" in r.stdout and w.logged() == [] and w.version() == "1"
+
+
+def test_failed_resumed_update_turns_read_only_back_on():
+    w = ScriptWorld(read_only=False)
+    shutil.rmtree(w.origin)                                      # "no internet"
+    r = w.run(os.path.join(w.repo, "update.sh"), "--release", "--resumed")
+    assert r.returncode != 0
+    assert w.logged() == ["raspi-config nonint enable_overlayfs", "systemctl reboot"]
+    assert w.status()["result"] == "failed" and w.version() == "1"
+
+
+def test_resume_does_nothing_without_a_note_and_never_loops():
+    w = ScriptWorld(read_only=False)
+    r = w.run(os.path.join(w.repo, "scripts", "resume.sh"))
+    assert r.returncode == 0 and w.logged() == []
+    # read-only mode still on after the restart: give up, don't restart again
+    w.set_read_only(True)
+    open(os.path.join(w.fw, "tosslist-resume"), "w").write(f"{w.repo}/update.sh\n--release\n")
+    r = w.run(os.path.join(w.repo, "scripts", "resume.sh"))
+    assert w.logged() == [] and not os.path.exists(os.path.join(w.fw, "tosslist-resume"))
+    assert w.status()["result"] == "failed"
+
+
+def test_real_installer_turns_read_only_on_at_the_end():
+    w = ScriptWorld(read_only=False)
+    env = w.env()
+    r = subprocess.run(["bash", os.path.join(REPO_ROOT, "install.sh")], env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    log = w.logged()
+    assert log[0] == "apt-get update" and "overlayroot" in log[1]
+    assert "systemctl enable tosslist.service tosslist-setup.service tosslist-resume.service" in log
+    assert log[-2:] == ["raspi-config nonint enable_overlayfs", "systemctl reboot"]
+    assert w.status()["result"] == "ok"
+    # --no-readonly: remembered, and no restart
+    open(w.log, "w").close()
+    r = subprocess.run(["bash", os.path.join(REPO_ROOT, "install.sh"), "--no-readonly"],
+                       env=env, capture_output=True, text=True)
+    assert os.path.exists(os.path.join(w.data, "readonly-off"))
+    assert "raspi-config nonint enable_overlayfs" not in w.logged()
+    assert w.logged()[-1] == "systemctl restart tosslist-setup.service tosslist.service"
+    # read-only on when the installer runs: note + turn off + restart, nothing installed yet
+    open(w.log, "w").close(); w.set_read_only(True)
+    r = subprocess.run(["bash", os.path.join(REPO_ROOT, "install.sh"), "--readonly"],
+                       env=env, capture_output=True, text=True)
+    assert w.logged() == ["raspi-config nonint disable_overlayfs", "systemctl reboot"]
+    assert open(os.path.join(w.fw, "tosslist-resume")).read().endswith("install.sh\n--readonly\n")
 
 
 if __name__ == "__main__":

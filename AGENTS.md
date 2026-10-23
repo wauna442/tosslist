@@ -31,7 +31,8 @@ services versus what still needs a check on the real device.
 1. `git fetch origin` and branch from the current `origin/main`, so you don't
    undo someone else's change.
 2. Run `python3 tests/test_tosslist.py` — every test must pass.
-3. Run `python3 -m pyflakes *.py tests/*.py` and `shellcheck install.sh`.
+3. Run `python3 -m pyflakes *.py tests/*.py` and
+   `shellcheck -x install.sh update.sh scripts/*.sh`.
 4. Bug fixes: add a test that fails without the fix.
 5. Update `README.md` if setup or what a person sees changed. Do **not**
    edit `CHANGELOG.md`; that happens at release time.
@@ -53,7 +54,9 @@ tool that wrote them.
 | `common.py` | Settings, atomic JSON writes, offline queue, LED/buzzer feedback, which destinations are ready |
 | `kroger.py` | Kroger Public API: OAuth + PKCE, token refresh under a file lock, store search, UPC matching, cart add |
 | `walmart.py` | Walmart Affiliate API: RSA key generation and request signing, UPC lookup, the on-device Walmart list, cart link |
-| `install.sh` | Installs apt packages, copies `*.py` to `/opt/tosslist`, installs and starts the two services |
+| `install.sh` | Installs apt packages, copies `*.py` and `scripts/` to `/opt/tosslist`, installs the services, turns read-only mode on (`--no-readonly` to keep it off) |
+| `update.sh` | Fetches a release (default) or `--main`, never moves backwards, then runs `install.sh` |
+| `scripts/lib.sh`, `scripts/resume.sh` | Read-only mode helpers; `resume.sh` finishes an install/update after the restart that turns read-only off |
 | `systemd/` | `tosslist.service` (scanner) and `tosslist-setup.service` (settings page) |
 | `tests/test_tosslist.py` | Self-contained tests with fake Todoist, Kroger, Walmart, product databases and WiFi |
 
@@ -63,6 +66,12 @@ tool that wrote them.
   `evdev`, `gpiozero` and `cryptography`. No `pip` installs on the device.
 - Every persistent write goes through `common.write_json` (temp file, fsync,
   rename) — Principle VII. Credential files are also `chmod 600`.
+- **Read-only mode (overlayroot):** the root file system is in RAM; data
+  lives in `common.DATA_DIR`, which is `/media/root-ro/var/lib/tosslist` in
+  read-only mode. Any other write to the real disk must be inside
+  `with common.writable():`. Lock files go in `common.LOCK_DIR` (`/run`),
+  never on the real disk. Shell scripts use `run` for system-changing
+  commands so tests can record them with `TOSSLIST_DRY_RUN`.
 - New settings go in `common.DEFAULT_CONFIG` with a prefix for their feature.
 - Each destination returns a short result code (`added`, `duplicate`,
   `not_found`, `maybe`, `auth`, ...). Network errors raise

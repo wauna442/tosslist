@@ -43,14 +43,15 @@ def create_key():
     pem = key.private_bytes(serialization.Encoding.PEM,
                             serialization.PrivateFormat.TraditionalOpenSSL,
                             serialization.NoEncryption())
-    os.makedirs(os.path.dirname(KEY_PATH), exist_ok=True)
-    tmp = KEY_PATH + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(pem)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, KEY_PATH)
+    with common.writable():
+        os.makedirs(os.path.dirname(KEY_PATH), exist_ok=True)
+        tmp = KEY_PATH + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(pem)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, KEY_PATH)
     return public_key()
 
 

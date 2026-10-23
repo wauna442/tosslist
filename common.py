@@ -10,13 +10,57 @@ Everything the device remembers lives in /var/lib/tosslist:
   walmart_basket.json - items waiting to be opened in your Walmart cart
 """
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
+import subprocess
 import threading
 import time
 
-DATA_DIR = os.environ.get("TOSSLIST_DATA_DIR", "/var/lib/tosslist")
+# ---------- read-only mode (issue #7) ----------
+#
+# With Raspberry Pi OS's overlay file system on, everything written to the
+# SD card goes to RAM and disappears at the next power-up, so a power cut
+# can't damage the system. Tosslist's own data still has to survive, so it
+# is kept on the real disk (mounted read-only at /media/root-ro) and that
+# disk is unlocked only for the moment of each write.
+
+SYSTEM_DATA_DIR = "/var/lib/tosslist"
+LOWER_ROOT = os.environ.get("TOSSLIST_LOWER_ROOT", "/media/root-ro")
+PROC_CMDLINE = os.environ.get("TOSSLIST_PROC_CMDLINE", "/proc/cmdline")
+LOCK_DIR = os.environ.get("TOSSLIST_LOCK_DIR", "/run/tosslist")
+
+
+def read_only_active():
+    """True when the overlay (read-only) file system is on right now."""
+    try:
+        with open(PROC_CMDLINE) as f:
+            return "overlayroot=tmpfs" in f.read().split()
+    except OSError:
+        return False
+
+
+DATA_WARNING = ""
+
+
+def _choose_data_dir():
+    global DATA_WARNING
+    if os.environ.get("TOSSLIST_DATA_DIR"):
+        return os.environ["TOSSLIST_DATA_DIR"]
+    lower = LOWER_ROOT + SYSTEM_DATA_DIR
+    if read_only_active():
+        if os.path.isdir(lower):
+            return lower
+        DATA_WARNING = ("Read-only mode is on, but Tosslist can't find its saved "
+                        "data, so changes will be lost at the next restart. Run "
+                        "the installer again over SSH.")
+        logging.getLogger("tosslist").error(DATA_WARNING)
+    return SYSTEM_DATA_DIR
+
+
+DATA_DIR = _choose_data_dir()
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 QUEUE_PATH = os.path.join(DATA_DIR, "queue.json")
 CACHE_PATH = os.path.join(DATA_DIR, "cache.json")
@@ -57,6 +101,51 @@ _lock = threading.Lock()
 
 # ---------- small, power-loss-safe JSON files ----------
 
+def _remount(mode):
+    """Remount the real disk "rw" or "ro". Replaced in tests."""
+    subprocess.run(["mount", "-o", f"remount,{mode}", LOWER_ROOT],
+                   check=True, capture_output=True, timeout=30)
+
+
+_depth = threading.local()
+
+
+@contextlib.contextmanager
+def writable():
+    """Unlock the real disk for the duration of the block, when read-only mode
+    is on; otherwise do nothing. Safe to nest, and safe across the two
+    Tosslist services, which take turns through a lock file in /run (RAM)."""
+    if not DATA_DIR.startswith(LOWER_ROOT + "/"):
+        yield
+        return
+    if getattr(_depth, "n", 0):
+        _depth.n += 1
+        try:
+            yield
+        finally:
+            _depth.n -= 1
+        return
+    os.makedirs(LOCK_DIR, exist_ok=True)
+    with open(os.path.join(LOCK_DIR, "rw.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _remount("rw")
+        _depth.n = 1
+        try:
+            yield
+        finally:
+            _depth.n = 0
+            os.sync()
+            for attempt in range(10):
+                try:
+                    _remount("ro")
+                    break
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    time.sleep(0.2)
+            else:
+                log.warning("Couldn't re-lock the SD card; it will be retried "
+                            "after the next save")
+
+
 def read_json(path, default):
     try:
         with open(path) as f:
@@ -69,19 +158,20 @@ def write_json(path, data):
     """Write to a temp file, flush to disk, then rename over the old file.
     If power is cut mid-write, you keep either the old file or the new one,
     never a half-written one."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-    try:
-        dir_fd = os.open(os.path.dirname(path), os.O_RDONLY)
-        os.fsync(dir_fd)
-        os.close(dir_fd)
-    except OSError:
-        pass
+    with writable():
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        try:
+            dir_fd = os.open(os.path.dirname(path), os.O_RDONLY)
+            os.fsync(dir_fd)
+            os.close(dir_fd)
+        except OSError:
+            pass
 
 
 def load_config():

@@ -27,7 +27,8 @@ and [PR workflow](https://github.com/aethersdr/AetherSDR/blob/main/docs/PR-WORKF
 7. **The maintainer reviews and squash-merges.** Squash merge turns the
    whole pull request into one commit on `main`, with a clear message.
 8. **Update the device:** on the Pi, run
-   `cd ~/tosslist && git pull && sudo bash install.sh`.
+   `sudo bash ~/tosslist/update.sh --main` for the newest change, or
+   `sudo bash ~/tosslist/update.sh` once it's in a release.
 
 Nobody pushes directly to `main`, including the maintainer, apart from
 emergencies (see below).
@@ -54,7 +55,7 @@ every pull request and on every change to `main`:
 |---|---|
 | **Tests** | Runs `tests/test_tosslist.py` against simulated Todoist, Fred Meyer, Walmart and WiFi |
 | **Code checks** | `pyflakes`, which catches typos, unused code and undefined names |
-| **Installer check** | `shellcheck` on `install.sh` |
+| **Installer check** | `shellcheck` on `install.sh`, `update.sh` and `scripts/` |
 
 CI cannot test the barcode scanner, the light, the WiFi hotspot, or the real
 store services. Those need a real-device check, which the pull request
@@ -101,6 +102,7 @@ If a merged change breaks the tests or the device:
 3. **Never force-push `main`.** History on `main` is never rewritten.
 4. On the device, the previous version is one command away:
    `cd ~/tosslist && git checkout <last good commit or tag> && sudo bash install.sh`.
+   If read-only mode is on, the installer restarts the Pi to finish.
 
 ---
 

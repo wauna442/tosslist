@@ -1,0 +1,14 @@
+[Unit]
+Description=Finish a Tosslist install or update after a read-only mode restart
+ConditionPathExists=|/boot/firmware/tosslist-resume
+ConditionPathExists=|/boot/tosslist-resume
+Wants=network-online.target
+After=network-online.target NetworkManager-wait-online.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/tosslist/scripts/resume.sh
+TimeoutStartSec=30min
+
+[Install]
+WantedBy=multi-user.target
