@@ -1,0 +1,13 @@
+[Unit]
+Description=Tosslist setup page and WiFi setup mode
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/tosslist/setup_portal.py
+WorkingDirectory=/opt/tosslist
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.tmp
+.DS_Store
+# Never commit settings: they hold your Todoist token
+config.json

@@ -1,0 +1,12 @@
+[Unit]
+Description=Tosslist barcode scanner
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/tosslist/scanner.py
+WorkingDirectory=/opt/tosslist
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
