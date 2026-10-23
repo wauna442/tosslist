@@ -14,6 +14,7 @@ import uuid
 import requests
 
 import common
+import alerts
 import kroger
 import walmart
 
@@ -180,12 +181,20 @@ class TodoistClient:
         tasks = self._get_all("/tasks", {"project_id": project_id})
         return {t.get("content", "").strip().lower() for t in tasks}
 
-    def add_task(self, project_id, content, description="", request_id=None):
+    def add_task(self, project_id, content, description="", request_id=None,
+                 priority=None, due_string=None):
+        body = {"content": content, "project_id": project_id,
+                "description": description}
+        if priority:
+            body["priority"] = priority          # 4 = p1, Todoist's highest
+        if due_string:
+            body["due_string"] = due_string
         return self._request(
-            "POST", "/tasks",
-            json={"content": content, "project_id": project_id,
-                  "description": description},
+            "POST", "/tasks", json=body,
             headers={"X-Request-Id": request_id or str(uuid.uuid4())})
+
+    def close_task(self, task_id):
+        return self._request("POST", f"/tasks/{task_id}/close")
 
 
 # ---------- what happens on each scan ----------
@@ -390,6 +399,9 @@ def send_item(item, cfg, todoist_factory=None, kroger_factory=None,
         item["pending"].remove(step)
     if not item.get("name"):
         item["name"] = item.get("store_name")
+    for s in STORES:                    # for Todoist alerts (issue #10)
+        if s in results:
+            alerts.note(s, results[s] != "auth")
     return results
 
 
@@ -522,13 +534,23 @@ def retry_queue_once(todoist_factory=None, kroger_factory=None, walmart_factory=
     return sent
 
 
+ALERT_EVERY = 5          # check for problems every 5th retry pass (~5 min)
+
+
 def _retry_loop():
+    passes = 0
     while True:
         time.sleep(RETRY_SECONDS)
         try:
             retry_queue_once()
         except Exception:
             log.exception("Retry failed")
+        passes += 1
+        if passes % ALERT_EVERY == 1:
+            try:
+                alerts.sync()
+            except Exception:
+                log.exception("Alert check failed")
 
 
 # ---------- finding and reading the scanner ----------

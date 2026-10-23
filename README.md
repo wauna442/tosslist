@@ -253,6 +253,28 @@ On **http://tosslist.local**, under **Store order and rules**:
 
 ---
 
+## Alerts in Todoist
+
+Tosslist has no screen, so when something needs a person it adds a task to
+your shared Todoist list, so you both see it. The task is **priority 1
+(red) and due today**, which puts it at the top of Today and of lists sorted
+by priority. Examples:
+
+- **⚠️ Tosslist: Reconnect Fred Meyer**, when Fred Meyer's sign-in stops working
+- **⚠️ Tosslist: Fix the Walmart connection**
+- **⚠️ Tosslist: Scans are stuck waiting to send**, after 2 hours
+- **⚠️ Tosslist: An update didn't finish**
+
+Each task explains what to do. Once it's fixed, Tosslist closes the task by
+itself (checks run about every 5 minutes). The same list appears under
+**Needs attention** at the top of the settings page. Turn alerts off under
+**Updates and alerts**.
+
+If Todoist itself stops working, Tosslist can't alert you there. The light
+blinks 5 times on each scan, and Recent scans shows what's wrong.
+
+---
+
 ## Settings PIN
 
 Changing settings needs your PIN. After you enter it, that phone or computer
