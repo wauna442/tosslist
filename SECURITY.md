@@ -30,10 +30,16 @@ account, which Tosslist's services run as.
 These are accepted for a home device. Reports that find a way around them
 **beyond** what is described here are very welcome.
 
-- **The settings page has no password and uses plain HTTP.** Anyone on the
-  home WiFi can open `http://tosslist.local`. It never shows saved secrets
-  back (fields say "Saved ✓"), but someone on the network could change
-  settings or disconnect a store.
+- **The settings page uses plain HTTP, protected by a PIN.** Anyone on the
+  home WiFi can open `http://tosslist.local` and see recent scans and the
+  Walmart list. Changing settings needs the PIN, which is stored only as a
+  salted PBKDF2 hash. Five wrong tries lock entry for 5 minutes, and an
+  unlocked browser stays unlocked for 30 minutes. Because the connection
+  isn't encrypted, someone able to watch home WiFi traffic could capture
+  the PIN or an unlocked session. The settings cookie is never sent with
+  requests started by other websites.
+- **The PIN reset card** clears the PIN when scanned on the device, so
+  physical access to the scanner plus the card is enough to reset it.
 - **The setup hotspot is open** while the device is in setup mode, so the
   setup page works from any phone. It only appears when the device can't
   reach a known WiFi network.
