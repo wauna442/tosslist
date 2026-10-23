@@ -49,7 +49,7 @@ export DEBIAN_FRONTEND=noninteractive
 run apt-get update
 run apt-get install -y python3-evdev python3-flask python3-requests \
   python3-gpiozero python3-cryptography network-manager dnsmasq-base \
-  avahi-daemon overlayroot
+  avahi-daemon overlayroot tesseract-ocr
 
 echo "==> Copying the program to $APP"
 run mkdir -p "$APP/scripts" "$SYSTEM_DATA_DIR"

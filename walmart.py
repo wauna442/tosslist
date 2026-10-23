@@ -123,25 +123,26 @@ class WalmartClient:
         r.raise_for_status()
         return r.json()
 
-    def find_product(self, barcode):
+    def find_product(self, barcode, item_id=None):
         """Returns {"item_id", "name", "price", "stock"} or None if Walmart
         doesn't know it. "stock" is walmart.com availability text, e.g.
-        "Available" or "Not available" (not your local store)."""
+        "Available" or "Not available" (not your local store).
+        item_id: a Walmart item to use instead of the barcode (a taught item)."""
+        if item_id and str(item_id).isdigit():
+            found = _items(self._get(f"/items/{item_id}", {}))
+            return found[0] if found else None
         for upc in upc_candidates(barcode):
-            data = self._get("/items", {"upc": upc})
-            if not data:
-                continue
-            items = data.get("items") if isinstance(data, dict) else data
-            if isinstance(data, dict) and items is None and data.get("itemId"):
-                items = [data]
-            for it in items or []:
-                if it.get("itemId"):
-                    price = it.get("salePrice") or it.get("msrp")
-                    return {"item_id": str(it["itemId"]),
-                            "name": (it.get("name") or "").strip(),
-                            "price": float(price) if price else None,
-                            "stock": (it.get("stock") or None)}
+            found = _items(self._get("/items", {"upc": upc}))
+            if found:
+                return found[0]
         return None
+
+    def search(self, query, limit=8):
+        """walmart.com products matching some words (for teaching an item)."""
+        if len(query.strip()) < 3:
+            return []
+        return _items(self._get("/search", {"query": query.strip(),
+                                            "numItems": limit}))[:limit]
 
     def check(self):
         """Raises WalmartAuthError if the setup is wrong."""
@@ -149,6 +150,27 @@ class WalmartClient:
 
 
 # ---------- the Walmart list kept on the device ----------
+
+def _items(data):
+    """Walmart answers with {"items": [...]}, a list, or a single item."""
+    if not data:
+        return []
+    if isinstance(data, dict):
+        items = data.get("items")
+        if items is None:
+            items = [data] if data.get("itemId") else []
+    else:
+        items = data
+    out = []
+    for it in items:
+        if isinstance(it, dict) and it.get("itemId"):
+            price = it.get("salePrice") or it.get("msrp")
+            out.append({"item_id": str(it["itemId"]),
+                        "name": (it.get("name") or "").strip(),
+                        "price": float(price) if price else None,
+                        "stock": (it.get("stock") or None)})
+    return out
+
 
 def in_stock(product):
     """True / False, or None when Walmart gave no availability."""
@@ -180,6 +202,19 @@ def basket_remove(entry_id):
     b = basket()
     b["items"] = [it for it in b["items"] if it["id"] != entry_id]
     common.write_json(BASKET_PATH, b)
+
+
+def basket_decrement(item_id):
+    """Take one of this item off the list. Returns False if it wasn't there."""
+    b = basket()
+    for it in b["items"]:
+        if it["item_id"] == item_id:
+            it["qty"] -= 1
+            if it["qty"] <= 0:
+                b["items"].remove(it)
+            common.write_json(BASKET_PATH, b)
+            return True
+    return False
 
 
 def basket_clear():

@@ -253,6 +253,49 @@ On **http://tosslist.local**, under **Store order and rules**:
 
 ---
 
+## Teach an item
+
+When a scan shows up as **"Unknown item 0123…"**, or as **"not sold at your
+store"** for something you know Fred Meyer or Walmart carries, teach it once:
+
+1. On the settings page, under **Recent scans**, tap **Teach** next to it.
+2. **Take a photo** of the front of the package. The Pi reads the words on
+   it; tap the ones that matter. The photo is only used to read the text.
+   It isn't kept or sent anywhere.
+3. **Search.** Tosslist looks up those words at Open Food Facts, and at
+   Fred Meyer and Walmart if they're set up, with prices.
+4. **Pick** the matching Fred Meyer and Walmart products and a name, then
+   tap **Save**.
+
+From then on, that barcode uses your name in Todoist, and the exact Fred
+Meyer and Walmart products you picked. No PIN is needed to teach items. To
+undo it, open Teach for that barcode again and tap **Forget what I taught**.
+
+Can't get a clear photo? Type the words yourself, search the web for the
+barcode number (there's a link), or use Google Lens in your phone's camera
+app and type in what it finds.
+
+---
+
+## Undo a scan
+
+Scanned something you meant to keep? Two ways to take it back:
+
+- **The undo card.** Open **http://tosslist.local**, tap **undo card**
+  (above Recent scans), and print it or download it. Scanning it right after
+  a mistake removes that scan from Todoist and the Walmart list. Scanning it
+  again undoes the scan before that, going back up to 24 hours. Tape it to
+  the scanner or the trash can.
+- **The Undo button** next to each recent scan on the settings page. No PIN
+  needed.
+
+Fred Meyer doesn't let apps remove cart items, so for those, Recent scans
+reminds you to remove it in the Fred Meyer app. A scan still waiting for
+the internet is simply cancelled. If Todoist can't be reached, the light
+blinks 5 times; scan Undo again later and it finishes only what's left.
+
+---
+
 ## Alerts in Todoist
 
 Tosslist has no screen, so when something needs a person it adds a task to
@@ -393,8 +436,7 @@ this once instead: `cd ~/tosslist && git pull && sudo bash install.sh`
 - **Scans do nothing, light stays off:** check the scanner is in the USB
   data port, not the power port.
 - **Item shows as "Unknown item 0123…":** the product isn't in the free
-  databases. Rename it in Todoist. Next time it'll still say unknown, but your
-  list is still useful.
+  databases. Use **Teach** next to it in Recent scans (see "Teach an item").
 - **See what the device is doing:** SSH in (Step 4) and run
   `journalctl -u tosslist -f` . Press Ctrl+C to stop watching.
 
@@ -421,6 +463,9 @@ same patterns as the light.
 |---|---|
 | `scanner.py` | Reads the scanner, looks up the product, sends it where you chose |
 | `kroger.py` | The Fred Meyer connection: sign-in, store search, prices, cart |
+| `teach.py` | Teaching items: reads package text from a photo (Tesseract), searches, remembers per barcode |
+| `alerts.py` | Todoist alerts when Tosslist needs attention |
+| `barcode.py` | Printable Code 128 barcodes for the undo and PIN reset cards |
 | `walmart.py` | The Walmart connection: key, product lookup, Walmart list, cart link |
 | `setup_portal.py` | The settings page and the WiFi setup mode |
 | `common.py` | Shared pieces: saving settings, the offline queue, the light |

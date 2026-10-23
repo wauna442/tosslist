@@ -16,6 +16,7 @@ import requests
 import common
 import alerts
 import kroger
+import teach
 import walmart
 
 log = logging.getLogger("tosslist")
@@ -107,6 +108,9 @@ def _upcitemdb_lookup(barcode, session):
 def lookup_product(barcode, session=None):
     """Returns a product name, or None if nobody knows this barcode.
     Raises requests.RequestException if there's no internet."""
+    taught = teach.get(barcode)              # you taught it a name (issue #9)
+    if taught:
+        return taught["name"]
     session = session or requests.Session()
     cache = common.read_json(common.CACHE_PATH, {})
     if barcode in cache:
@@ -196,6 +200,9 @@ class TodoistClient:
     def close_task(self, task_id):
         return self._request("POST", f"/tasks/{task_id}/close")
 
+    def delete_task(self, task_id):
+        return self._request("DELETE", f"/tasks/{task_id}")
+
 
 # ---------- what happens on each scan ----------
 #
@@ -241,8 +248,9 @@ def _todoist(item, cfg, todoist_factory):
     if cfg.get("skip_duplicates", True):
         if item["name"].strip().lower() in client.open_task_names(pid):
             return "duplicate"
-    client.add_task(pid, item["name"], f"Barcode: {item['barcode']}",
-                    request_id=item["id"])
+    task = client.add_task(pid, item["name"], f"Barcode: {item['barcode']}",
+                           request_id=item["id"])
+    item["todoist_task_id"] = (task or {}).get("id")       # for undo (issue #8)
     return "added"
 
 
@@ -263,13 +271,16 @@ class _Stores:
     def lookup(self, store, item):
         """Returns the product (or None) and records a check on the item:
         {"found", "in_stock" (True/False/None), "price"}."""
+        taught = teach.get(item["barcode"]) or {}
         if store == "kroger":
             product = self.client(store).find_product(
-                item["barcode"], self.cfg["kroger_location_id"])
+                item["barcode"], self.cfg["kroger_location_id"],
+                ids=[taught["kroger_upc"]] if taught.get("kroger_upc") else None)
             avail = kroger.in_stock(product, self.cfg.get("kroger_low_counts", True)) \
                 if product else None
         else:
-            product = self.client(store).find_product(item["barcode"])
+            product = self.client(store).find_product(
+                item["barcode"], item_id=taught.get("walmart_item_id"))
             avail = walmart.in_stock(product) if product else None
         item.setdefault("checks", {})[store] = {
             "found": product is not None, "in_stock": avail,
@@ -289,6 +300,7 @@ class _Stores:
                 return "maybe"
             return "added"
         walmart.basket_add(product, item["barcode"])
+        item["walmart_item_id"] = product["item_id"]        # for undo (issue #8)
         return "listed"
 
 
@@ -374,6 +386,9 @@ def send_item(item, cfg, todoist_factory=None, kroger_factory=None,
     the unfinished steps left in item["pending"]."""
     item.setdefault("pending", ["todoist"])     # items queued by older versions
     item.setdefault("rule", "every")
+    taught = teach.get(item["barcode"])
+    if taught and not item.get("name"):
+        item["name"] = taught["name"]
     results = item.setdefault("results", {})
     stores = _Stores(cfg, kroger_factory, walmart_factory)
     steps = [st for st in item["pending"] if st in STORES]
@@ -450,12 +465,15 @@ def summarize(item):
 CARD_PREFIX = "TOSSLIST-"
 
 
-def handle_card(code, feedback):
+def handle_card(code, feedback, todoist_factory=None):
     """Tosslist's own printed cards. Returns True if `code` was one; such
     codes are never sent to a store or list."""
     if not code.upper().startswith(CARD_PREFIX):
         return False
-    entry = {"time": time.strftime("%Y-%m-%d %H:%M"), "barcode": code}
+    if code.upper() == UNDO_CODE:
+        undo_last(feedback, todoist_factory)
+        return True
+    entry = {"time": time.strftime("%Y-%m-%d %H:%M"), "barcode": code, "kind": "card"}
     info = common.read_json(common.PIN_PATH, None)
     if info and code.upper() == info.get("reset_code", "").upper():
         common.remove_file(common.PIN_PATH)
@@ -472,10 +490,10 @@ def handle_card(code, feedback):
 
 def handle_scan(barcode, feedback, todoist_factory=None, kroger_factory=None,
                 walmart_factory=None):
-    if handle_card(barcode, feedback):
+    if handle_card(barcode, feedback, todoist_factory):
         return "card"
     cfg = common.load_config()
-    entry = {"time": time.strftime("%Y-%m-%d %H:%M"), "barcode": barcode}
+    entry = {"time": time.strftime("%Y-%m-%d %H:%M"), "barcode": barcode, "kind": "scan"}
     dests = common.destinations(cfg)
     if not dests:
         log.warning("Scanned %s but no destination is set up yet", barcode)
@@ -507,8 +525,7 @@ def handle_scan(barcode, feedback, todoist_factory=None, kroger_factory=None,
         common.queue_add(item)
         feedback.queued()
         outcome = "queued"
-    entry.update(name=item.get("name") or item.get("store_name"),
-                 result=summarize(item))
+    entry.update(_recent_fields(item))
     log.info("%s: %s (%s)", barcode, entry["name"], entry["result"])
     common.record_recent(entry)
     return outcome
@@ -529,9 +546,113 @@ def retry_queue_once(todoist_factory=None, kroger_factory=None, walmart_factory=
             for rest in pending[i:]:
                 common.queue_add(rest)
             break
+        finally:
+            common.update_recent(item.get("id"), _recent_fields(item))
     if sent:
         log.info("Sent %d saved item(s)", sent)
     return sent
+
+
+# ---------- undo (issue #8) ----------
+#
+# Scanning the printed undo card (or tapping Undo in Recent scans) reverses
+# the most recent scan that hasn't been undone; scanning it again goes one
+# further back. Fred Meyer's API can't remove cart items, so for those the
+# person is told to remove it in the app.
+
+UNDO_CODE = "TOSSLIST-UNDO"
+UNDO_WINDOW = 24 * 60 * 60
+
+
+def _undo_info(item):
+    results = item.get("results", {})
+    info = {}
+    if results.get("todoist") == "added" and item.get("todoist_task_id"):
+        info["todoist_task_id"] = item["todoist_task_id"]
+    if results.get("walmart") == "listed" and item.get("walmart_item_id"):
+        info["walmart_item_id"] = item["walmart_item_id"]
+    if results.get("kroger") in ("added", "maybe"):
+        info["kroger"] = True
+    if item.get("pending"):
+        info["queued"] = True
+    return info
+
+
+def _recent_fields(item):
+    return {"id": item.get("id"), "name": item.get("name") or item.get("store_name"),
+            "result": summarize(item), "undo": _undo_info(item)}
+
+
+def undo_entry(entry, todoist_factory=None):
+    """Reverse one recent scan. Returns (finished, explanation, what's left),
+    so a retry never repeats a part that already worked."""
+    info = dict(entry.get("undo") or {})
+    parts = []
+    if info.pop("queued", False):
+        queued = common.queue_remove(entry.get("id"))
+        if queued is None:
+            fresh = next((e for e in common.read_json(common.RECENT_PATH, [])
+                          if e.get("id") == entry.get("id")), {})
+            if (fresh.get("undo") or {}).get("queued"):
+                return (False, "it's being sent right now. Scan Undo again in a minute",
+                        entry.get("undo"))
+            info = dict(fresh.get("undo") or {})
+        else:
+            info = _undo_info(dict(queued, pending=[]))
+            parts.append("taken out of the waiting scans")
+    left = {}
+    if info.get("todoist_task_id"):
+        cfg = common.load_config()
+        try:
+            client = (todoist_factory or TodoistClient)(cfg["todoist_token"])
+            client.delete_task(info["todoist_task_id"])
+            parts.append("removed from Todoist")
+        except (requests.RequestException, TodoistAuthError):
+            left["todoist_task_id"] = info["todoist_task_id"]
+            parts.append("couldn't reach Todoist to remove it, so scan Undo again later")
+    if info.get("walmart_item_id"):
+        parts.append("removed from the Walmart list"
+                     if walmart.basket_decrement(info["walmart_item_id"])
+                     else "already gone from the Walmart list")
+    if info.get("kroger"):
+        parts.append("remove it from your Fred Meyer cart in the app "
+                     "(Fred Meyer doesn't let apps remove items)")
+    text = ", ".join(parts) or "it hadn't added anything, so there was nothing to remove"
+    return not left, text, left
+
+
+def undo_last(feedback, todoist_factory=None, entry_id=None):
+    """Undo the newest scan not yet undone (or a specific one)."""
+    now = time.time()
+    target = None
+    for e in common.read_json(common.RECENT_PATH, []):
+        if e.get("kind") != "scan" or e.get("undone") or not e.get("id"):
+            continue
+        if entry_id and e.get("id") != entry_id:
+            continue
+        if now - e.get("ts", 0) <= UNDO_WINDOW:
+            target = e
+        break
+    record = {"time": time.strftime("%Y-%m-%d %H:%M"), "barcode": UNDO_CODE,
+              "kind": "card", "name": "Undo"}
+    if target is None:
+        record["result"] = "Nothing to undo from the last 24 hours"
+        common.record_recent(record)
+        feedback.error()
+        return False
+    finished, text, left = undo_entry(target, todoist_factory)
+    name = target.get("name") or target.get("barcode")
+    record["result"] = f"{name}: {text}."
+    if finished:
+        common.update_recent(target["id"], {"undone": True,
+                                            "result": target.get("result", "") + " · Undone"})
+        feedback.success()
+    else:
+        common.update_recent(target["id"], {"undo": left})   # retry only what's left
+        feedback.error()
+    common.record_recent(record)
+    log.info("Undo %s: %s", name, text)
+    return finished
 
 
 ALERT_EVERY = 5          # check for problems every 5th retry pass (~5 min)
