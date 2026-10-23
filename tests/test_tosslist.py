@@ -32,6 +32,7 @@ class FakeSession:
         self.projects, self.tasks, self.calls = [], [], []
         self.cart, self.kroger_tokens_issued = [], 0
         self.cart_timeout = False
+        self.offline_hosts = set()
         self.expired_user_tokens = set()
 
     def get(self, url, **kw):
@@ -45,7 +46,8 @@ class FakeSession:
 
     def request(self, method, url, **kw):
         self.calls.append((method, url, kw.get("params"), kw.get("json")))
-        if self.offline: raise requests.ConnectionError("offline")
+        if self.offline or any(h in url for h in self.offline_hosts):
+            raise requests.ConnectionError("offline")
         if "openfoodfacts" in url:
             assert "User-Agent" in kw["headers"]
             if "0001" in url: return Resp(200, {"status": 1, "product": {"product_name": "Whole Milk", "brands": "Tillamook,Other"}})
@@ -91,7 +93,9 @@ class FakeSession:
         assert method == "GET" and path == "/items"
         upc = kw["params"]["upc"]
         catalog = {"011110417005": {"itemId": 10450114, "name": "Great Value 2% Milk, 1 gal", "salePrice": 3.12, "upc": upc},
-                   "042100005264": {"itemId": 55512, "name": "Small Soda 12 oz", "salePrice": 0.98}}
+                   "042100005264": {"itemId": 55512, "name": "Small Soda 12 oz", "salePrice": 0.98},
+                   "049000000443": {"itemId": 66601, "name": "Cola 2 Liter", "salePrice": 2.25, "stock": "Available"},
+                   "078742370057": {"itemId": 77701, "name": "Bread 20 oz", "salePrice": 3.50, "stock": "Not available"}}
         if upc in catalog:
             return Resp(200, {"items": [catalog[upc]]})
         return Resp(400, {"errors": [{"code": 4002, "message": "Invalid UPC"}]})
@@ -127,6 +131,12 @@ class FakeSession:
                                   "items": [{"size": "1 gal", "price": {"regular": 3.49, "promo": 2.99}}]},
                 "0004210000526": {"productId": "0004210000526", "description": "Small Soda",
                                   "items": [{"size": "12 oz", "price": {"regular": 1.25, "promo": 0}}]},
+                "0004900000044": {"productId": "0004900000044", "description": "Cola 2L",
+                                  "items": [{"size": "2 L", "price": {"regular": 2.50},
+                                             "inventory": {"stockLevel": "TEMPORARILY_OUT_OF_STOCK"}}]},
+                "0007874237005": {"productId": "0007874237005", "description": "Bread",
+                                  "items": [{"size": "20 oz", "price": {"regular": 4.00},
+                                             "inventory": {"stockLevel": "LOW"}}]},
             }
             return Resp(200, {"data": [catalog[i] for i in ids if i in catalog]})
         if path == "/cart/add":
@@ -368,7 +378,7 @@ def test_kroger_offline_and_partial_retry():
     s.offline = True
     assert scanner.handle_scan("011110417005", FakeFeedback(), tf, kf) == "queued"
     q = common.read_json(common.QUEUE_PATH, [])
-    assert q[0]["pending"] == ["todoist", "kroger"]
+    assert sorted(q[0]["pending"]) == ["kroger", "todoist"]
     assert "waiting for internet" in common.read_json(common.RECENT_PATH, [])[0]["result"]
     s.offline = False
     assert scanner.retry_queue_once(tf, kf) == 1
@@ -521,7 +531,8 @@ def test_all_three_destinations():
     assert common.destinations() == ["todoist", "kroger", "walmart"]
     scanner.handle_scan("04252614", FakeFeedback(), tf, kf, wf)
     r = common.read_json(common.RECENT_PATH, [])[0]
-    assert r["result"] == "Todoist: added · Fred Meyer: added ($1.25) · Walmart: on Walmart list ($0.98)"
+    assert r["result"] == ("Todoist: added · Fred Meyer: added ($1.25) · Walmart: on Walmart list ($0.98)"
+                           " · Would pick: First in stock → Fred Meyer, Cheapest → Walmart")
     assert s.tasks[0]["content"] == "Small Soda (12 oz)" and len(s.cart) == 1
     assert walmart.basket()["items"][0]["item_id"] == "55512"
 
@@ -571,6 +582,140 @@ def test_portal_walmart():
         c.post("/walmart/key", data={"replace": "1"}); assert walmart.public_key() != first
     finally:
         walmart.requests.Session = orig
+
+
+# ---------------- Store routing (issue #4) ----------------
+
+def routing_setup(rule, order=("kroger", "walmart"), todoist=False, todoist_when="always",
+                  low_counts=True):
+    s = FakeSession()
+    wf = walmart_setup(s, todoist=todoist)
+    common.save_config({"send_to_kroger": True, "kroger_client_id": "cid", "kroger_client_secret": "sec",
+                        "kroger_location_id": "70100123", "routing_rule": rule,
+                        "store_order": list(order), "todoist_when": todoist_when,
+                        "kroger_low_counts": low_counts})
+    common.write_json(common.KROGER_TOKEN_PATH, {"access_token": "user1", "refresh_token": "r1",
+                                                 "expires_at": time.time() + 1800})
+    kf = lambda cfg: kroger.KrogerClient(cfg, s)
+    tf = lambda t: scanner.TodoistClient(t, s)
+    scan = lambda code, fb=None: scanner.handle_scan(code, fb or FakeFeedback(), tf, kf, wf)
+    last = lambda: common.read_json(common.RECENT_PATH, [])[0]["result"]
+    return s, scan, last
+
+
+def walmart_calls(s):
+    return [c for c in s.calls if "walmart" in c[1]]
+
+
+def test_stock_levels():
+    assert kroger.in_stock({"stock": "HIGH"}) is True
+    assert kroger.in_stock({"stock": "LOW"}) is True
+    assert kroger.in_stock({"stock": "LOW"}, low_counts=False) is False
+    assert kroger.in_stock({"stock": "TEMPORARILY_OUT_OF_STOCK"}) is False
+    assert kroger.in_stock({"stock": None}) is None
+    assert walmart.in_stock({"stock": "Available"}) is True
+    assert walmart.in_stock({"stock": "Not available"}) is False
+    assert walmart.in_stock({"stock": None}) is None
+
+
+def test_first_in_stock():
+    s, scan, last = routing_setup("first_in_stock")
+    scan("011110417005")                       # Fred Meyer has it (stock not reported)
+    assert len(s.cart) == 1 and walmart.basket()["items"] == []
+    assert walmart_calls(s) == []              # Walmart wasn't even asked
+    assert last().startswith("First in stock → Fred Meyer.")
+    scan("049000000443")                       # out of stock at Fred Meyer
+    assert len(s.cart) == 1 and walmart.basket()["items"][0]["item_id"] == "66601"
+    assert last() == "First in stock → Walmart. Fred Meyer: out of stock · Walmart: on Walmart list ($2.25)"
+    scan("078742370057")                       # LOW at Fred Meyer counts as in stock
+    assert s.cart[-1][1]["upc"] == "0007874237005"
+
+
+def test_first_in_stock_low_does_not_count_and_todoist_fallback():
+    s, scan, last = routing_setup("first_in_stock", todoist=True, todoist_when="fallback",
+                                  low_counts=False)
+    fb = FakeFeedback()
+    scan("078742370057", fb)                   # low at FM, not available at Walmart
+    assert s.cart == [] and walmart.basket()["items"] == []
+    assert s.tasks[-1]["content"] == "Bread (20 oz)"
+    assert last() == ("First in stock: no store had it. Todoist: added · "
+                      "Fred Meyer: out of stock · Walmart: out of stock")
+    assert fb.calls == ["success"]
+    scan("011110417005")                       # a store took it -> Todoist skipped
+    assert len(s.tasks) == 1 and "Todoist: skipped, a store had it" in last()
+
+
+def test_store_order_respected():
+    s, scan, last = routing_setup("first_in_stock", order=("walmart", "kroger"))
+    scan("011110417005")
+    assert walmart.basket()["items"][0]["item_id"] == "10450114" and s.cart == []
+    assert last().startswith("First in stock → Walmart.")
+
+
+def test_cheapest_in_stock():
+    s, scan, last = routing_setup("cheapest")
+    scan("011110417005")                       # FM $2.99 (sale) vs Walmart $3.12
+    assert len(s.cart) == 1 and walmart.basket()["items"] == []
+    assert last() == ("Cheapest in stock → Fred Meyer. Fred Meyer: added ($2.99) · "
+                      "Walmart: had it, another store was picked ($3.12)")
+    scan("04252614")                           # FM $1.25 vs Walmart $0.98
+    assert len(s.cart) == 1 and walmart.basket()["items"][0]["item_id"] == "55512"
+    scan("049000000443")                       # cheaper at FM? out of stock -> Walmart
+    assert len(s.cart) == 1 and walmart.basket()["items"][-1]["item_id"] == "66601"
+
+
+def test_unreachable_store_waits_never_falls_through():
+    # Principle IV: Fred Meyer unreachable must not send the scan to Walmart.
+    s, scan, last = routing_setup("first_in_stock", todoist=True, todoist_when="fallback")
+    s.offline_hosts.add("api.kroger.com")
+    fb = FakeFeedback()
+    assert scan("011110417005", fb) == "queued"
+    assert walmart.basket()["items"] == [] and s.tasks == [] and fb.calls == ["queued"]
+    assert "First in stock: waiting for internet" in last()
+    s.offline_hosts.clear()
+    assert scanner.retry_queue_once(lambda t: scanner.TodoistClient(t, s),
+                                    lambda cfg: kroger.KrogerClient(cfg, s),
+                                    lambda cfg: walmart.WalmartClient(cfg, s)) == 1
+    assert len(s.cart) == 1 and walmart.basket()["items"] == [] and s.tasks == []
+    # Cheapest also waits rather than deciding with one store missing
+    s2, scan2, _ = routing_setup("cheapest")
+    s2.offline_hosts.add("developer.api.walmart.com")
+    assert scan2("011110417005") == "queued" and s2.cart == []
+
+
+def test_sign_in_problem_moves_to_next_store():
+    s, scan, last = routing_setup("first_in_stock")
+    common.write_json(common.KROGER_TOKEN_PATH, {"access_token": "x", "refresh_token": "dead",
+                                                 "expires_at": 0})
+    scan("011110417005")                       # FM sign-in broken -> Walmart
+    assert walmart.basket()["items"][0]["item_id"] == "10450114"
+    assert "Fred Meyer: sign-in problem" in last()
+
+
+def test_portal_rules_card():
+    s, scan, last = routing_setup("every")
+    setup_portal.state.update(hotspot=False, stores=[], zip="", oauth={})
+    c = setup_portal.app.test_client()
+    html = c.get("/").get_data(as_text=True)
+    assert "Store order and rules" in html and "First in stock" in html
+    assert html.index("1.</td>") < html.index("Fred Meyer<br>") < html.index("Walmart<br>")
+    c.post("/save", data={"has_dest": "1", "send_to_kroger": "1", "send_to_walmart": "1",
+                          "has_rules": "1", "routing_rule": "first_in_stock",
+                          "todoist_when": "fallback", "move": "walmart:up"})
+    cfg = common.load_config()
+    assert cfg["routing_rule"] == "first_in_stock" and cfg["todoist_when"] == "fallback"
+    assert cfg["store_order"] == ["walmart", "kroger"] and cfg["kroger_low_counts"] is False
+    c.post("/save", data={"has_rules": "1", "routing_rule": "bogus", "kroger_low_counts": "1",
+                          "move": "kroger:down"})   # already last: no change
+    cfg = common.load_config()
+    assert cfg["routing_rule"] == "first_in_stock" and cfg["store_order"] == ["walmart", "kroger"]
+    assert cfg["kroger_low_counts"] is True
+
+
+def test_default_is_unchanged_behavior():
+    assert common.DEFAULT_CONFIG["routing_rule"] == "every"
+    assert common.DEFAULT_CONFIG["todoist_when"] == "always"
+    assert common.DEFAULT_CONFIG["kroger_low_counts"] is True
 
 
 if __name__ == "__main__":
