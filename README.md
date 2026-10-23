@@ -253,6 +253,31 @@ On **http://tosslist.local**, under **Store order and rules**:
 
 ---
 
+## Kinds of items (sections in Todoist)
+
+Tosslist sorts your shared Todoist list into **sections by kind of item**,
+using the product categories from UPCitemdb, so a hammer lands under
+**Hardware** and shampoo under **Health & Beauty**. Anything Open Food Facts
+knows goes under **Food, Beverages & Tobacco**. Items nobody recognizes go
+to the top of the list, as before.
+
+Under **Kinds of items** on the settings page, each kind you've scanned is
+listed with:
+
+- **Section name.** Rename it, for example "Groceries" or "Home Depot run".
+- **Try Fred Meyer and Walmart.** Turn this off for kinds you don't buy at
+  the grocery store, and those scans go only to Todoist. **Hardware**,
+  **Electronics**, **Vehicles & Parts** and similar kinds start off; food,
+  health & beauty, home & garden, baby and pet supplies start on.
+
+UPCitemdb's categories come from retailers and aren't always right (AA
+batteries can show up as "Health & Beauty"). Fix one with **Teach** →
+**Which kind?**, and that barcode uses your choice from then on. To turn
+sections off entirely, uncheck **Sort your Todoist list into sections by
+kind**.
+
+---
+
 ## Teach an item
 
 When a scan shows up as **"Unknown item 0123…"**, or as **"not sold at your
@@ -264,8 +289,8 @@ store"** for something you know Fred Meyer or Walmart carries, teach it once:
    It isn't kept or sent anywhere.
 3. **Search.** Tosslist looks up those words at Open Food Facts, and at
    Fred Meyer and Walmart if they're set up, with prices.
-4. **Pick** the matching Fred Meyer and Walmart products and a name, then
-   tap **Save**.
+4. **Pick** the matching Fred Meyer and Walmart products, a name and, if
+   needed, **which kind** it is. Then tap **Save**.
 
 From then on, that barcode uses your name in Todoist, and the exact Fred
 Meyer and Walmart products you picked. No PIN is needed to teach items. To
@@ -463,6 +488,7 @@ same patterns as the light.
 |---|---|
 | `scanner.py` | Reads the scanner, looks up the product, sends it where you chose |
 | `kroger.py` | The Fred Meyer connection: sign-in, store search, prices, cart |
+| `kinds.py` | Kinds of items: UPCitemdb categories, Todoist sections, per-kind store switch |
 | `teach.py` | Teaching items: reads package text from a photo (Tesseract), searches, remembers per barcode |
 | `alerts.py` | Todoist alerts when Tosslist needs attention |
 | `barcode.py` | Printable Code 128 barcodes for the undo and PIN reset cards |

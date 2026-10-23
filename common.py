@@ -131,6 +131,8 @@ DEFAULT_CONFIG = {
     "auto_update": True,              # install new releases each night
     # Alerts (issue #10)
     "send_alerts": True,              # add a p1 Todoist task when Tosslist needs a person
+    # Kinds of items (issue #24)
+    "sort_by_kind": True,             # Todoist sections by kind; per-kind store switch
 }
 
 log = logging.getLogger("tosslist")

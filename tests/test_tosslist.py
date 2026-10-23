@@ -9,7 +9,7 @@ os.environ["TOSSLIST_LOCK_DIR"] = tempfile.mkdtemp()   # not /run: tests run as 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import requests
-import common, scanner, setup_portal, kroger, walmart, alerts, teach
+import common, scanner, setup_portal, kroger, walmart, alerts, teach, kinds
 
 
 class FakeFeedback:
@@ -31,6 +31,7 @@ class FakeSession:
     def __init__(self, offline=False, bad_token=False):
         self.offline, self.bad_token = offline, bad_token
         self.projects, self.tasks, self.calls = [], [], []
+        self.sections = []
         self.cart, self.kroger_tokens_issued = [], 0
         self.cart_timeout = False
         self.offline_hosts = set()
@@ -60,6 +61,10 @@ class FakeSession:
             return Resp(404, {"status": 0})
         if "upcitemdb" in url:
             if kw["params"]["upc"] == "0002": return Resp(200, {"items": [{"title": "Bounty Paper Towels"}]})
+            if kw["params"]["upc"] == "0003": return Resp(200, {"items": [{"title": "Claw Hammer 16 oz",
+                                                                         "category": "Hardware > Tools > Hammers"}]})
+            if kw["params"]["upc"] == "0004": return Resp(200, {"items": [{"title": "AA Batteries 4pk",
+                                                                         "category": "Health & Beauty > Personal Care"}]})
             return Resp(404, {})
         if "todoist" in url:
             if self.bad_token: return Resp(401, {})
@@ -70,6 +75,13 @@ class FakeSession:
             if method == "POST" and path == "/projects":
                 p = {"id": f"p{len(self.projects)}", "name": kw["json"]["name"]}
                 self.projects.append(p); return Resp(200, p)
+            if method == "GET" and path == "/sections":
+                return Resp(200, {"results": [x for x in self.sections
+                                              if x["project_id"] == kw["params"]["project_id"]],
+                                  "next_cursor": None})
+            if method == "POST" and path == "/sections":
+                sec = {"id": f"sec{len(self.sections) + 1}", **kw["json"]}
+                self.sections.append(sec); return Resp(200, sec)
             if method == "GET" and path == "/tasks":
                 return Resp(200, {"results": [t for t in self.tasks if t["project_id"] == kw["params"]["project_id"]
                                               and not t.get("closed")], "next_cursor": None})
@@ -195,7 +207,7 @@ def unlocked_client():
 def reset():
     for p in (common.CONFIG_PATH, common.QUEUE_PATH, common.CACHE_PATH, common.RECENT_PATH,
               common.KROGER_TOKEN_PATH, common.WALMART_BASKET_PATH, common.UPDATE_STATUS_PATH,
-              alerts.PROBLEMS_PATH, alerts.ALERTS_PATH, teach.TAUGHT_PATH):
+              alerts.PROBLEMS_PATH, alerts.ALERTS_PATH, teach.TAUGHT_PATH, kinds.KINDS_PATH):
         if os.path.exists(p): os.remove(p)
 
 
@@ -218,13 +230,15 @@ def test_scan_flow():
     assert s.tasks[0]["content"] == "Tillamook Whole Milk" and s.tasks[0]["project_id"] == "g"  # found via page 2
     assert scanner.handle_scan("0001", fb, make) == "done"
     assert len(s.tasks) == 1
-    assert common.read_json(common.RECENT_PATH, [])[0]["result"] == "Todoist: already on list"
+    assert common.read_json(common.RECENT_PATH, [])[0]["result"] == "Food, Beverages & Tobacco · Todoist: already on list"
+    assert s.tasks[0]["section_id"] == s.sections[0]["id"] and s.sections[0]["name"] == "Food, Beverages & Tobacco"
     assert scanner.handle_scan("0002", fb, make) == "done"
     assert s.tasks[-1]["content"] == "Bounty Paper Towels"
     assert scanner.handle_scan("9999", fb, make) == "done"
     assert s.tasks[-1]["content"] == "Unknown item 9999"
     assert fb.calls.count("success") == 4
-    assert common.read_json(common.CACHE_PATH, {})["0001"] == "Tillamook Whole Milk"
+    assert common.read_json(common.CACHE_PATH, {})["0001"] == {"name": "Tillamook Whole Milk",
+                                                               "kind": "Food, Beverages & Tobacco"}
 
 
 def test_creates_project():
@@ -254,7 +268,7 @@ def test_bad_token_and_unconfigured():
     s = FakeSession(bad_token=True)
     assert scanner.handle_scan("0001", fb, lambda t: scanner.TodoistClient(t, s)) == "done"
     assert fb.calls == ["error", "error"]
-    assert common.read_json(common.RECENT_PATH, [])[0]["result"] == "Todoist: sign-in problem, check settings"
+    assert common.read_json(common.RECENT_PATH, [])[0]["result"] == "Food, Beverages & Tobacco · Todoist: sign-in problem, check settings"
     assert common.queue_size() == 0     # a bad token isn't retried forever
 
 
@@ -1469,6 +1483,101 @@ def test_teach_pages_end_to_end():
     finally:
         teach.run_ocr = orig_ocr
         restore_sessions(orig)
+
+
+# ---------------- Kinds of items (issue #24) ----------------
+
+def kroger_asked(s, barcode):
+    return any("api.kroger.com" in c[1] and c[2] and barcode in (c[2].get("filter.productId") or "")
+               for c in s.calls)
+
+
+def section_of(s, task):
+    return next((x["name"] for x in s.sections if x["id"] == task.get("section_id")), None)
+
+
+def test_kind_from_category():
+    assert kinds.from_category("Home & Garden > Lighting > Light Bulbs") == "Home & Garden"
+    assert kinds.from_category("Hardware") == "Hardware"
+    assert kinds.from_category("") is None and kinds.from_category(None) is None
+    reset()
+    assert kinds.settings("Hardware") == {"section": "Hardware", "stores": False}
+    assert kinds.settings(kinds.FOOD)["stores"] is True
+    assert kinds.settings("Something New")["stores"] is True      # unknown kinds keep today's behavior
+
+
+def test_hardware_skips_stores_and_gets_its_own_section():
+    s, scan, last = routing_setup("every", todoist=True)
+    scan("0003")                                              # hammer: Hardware
+    task = s.tasks[-1]
+    assert task["content"] == "Claw Hammer 16 oz" and section_of(s, task) == "Hardware"
+    assert not kroger_asked(s, "0000000000003") and walmart.basket()["items"] == []
+    assert last() == "Hardware (stores off) · Todoist: added"
+    scan("011110417005")                                      # milk: not in OFF/UPCitemdb fakes -> no kind
+    assert "section_id" not in s.tasks[-1] and len(s.cart) == 1  # stores still tried
+    scan("0001")                                              # food (Open Food Facts)
+    assert section_of(s, s.tasks[-1]) == "Food, Beverages & Tobacco"
+    assert len([x for x in s.sections if x["name"] == "Hardware"]) == 1
+    scan("0005"); scan("0003")                                # section reused, not duplicated
+    assert len([x for x in s.sections if x["name"] == "Hardware"]) == 1
+
+
+def test_kind_settings_and_switching_off():
+    s, scan, last = routing_setup("every", todoist=True)
+    scan("0001")
+    kinds.update({kinds.FOOD: {"section": "Groceries", "stores": False}, "Not seen": {"section": "x"}})
+    assert [k["kind"] for k in kinds.listing()] == [kinds.FOOD]
+    common.save_config({"skip_duplicates": False})
+    scan("0001")
+    assert section_of(s, s.tasks[-1]) == "Groceries" and last().startswith("Food, Beverages & Tobacco (stores off)")
+    common.save_config({"sort_by_kind": False})
+    scan("0003")                                              # feature off: no section, stores tried
+    assert "section_id" not in s.tasks[-1] and kroger_asked(s, "0000000000003")
+
+
+def test_teach_kind_overrides_upcitemdb():
+    s, scan, last = routing_setup("every", todoist=True)
+    scan("0004")                                              # batteries: "Health & Beauty"
+    assert section_of(s, s.tasks[-1]) == "Health & Beauty" and kroger_asked(s, "0000000000004")
+    teach.remember("0004", "AA Batteries", kind="Hardware")
+    s.calls.clear()
+    common.save_config({"skip_duplicates": False})
+    scan("0004")
+    assert section_of(s, s.tasks[-1]) == "Hardware" and s.tasks[-1]["content"] == "AA Batteries"
+    assert not kroger_asked(s, "0000000000004")
+    assert not any("upcitemdb" in c[1] for c in s.calls)     # name + kind taught: no lookup needed
+
+
+def test_old_cache_and_offline_kind_lookup():
+    s, scan, last = routing_setup("every", todoist=True)
+    common.write_json(common.CACHE_PATH, {"0003": "Old Cached Name"})   # from an older version
+    s.offline = True
+    assert scan("0003") == "queued"
+    s.offline = False
+    scanner.retry_queue_once(lambda t: scanner.TodoistClient(t, s), lambda c: kroger.KrogerClient(c, s),
+                             lambda c: walmart.WalmartClient(c, s))
+    assert section_of(s, s.tasks[-1]) == "Hardware" and not kroger_asked(s, "0000000000003")
+    assert common.read_json(common.CACHE_PATH, {})["0003"]["kind"] == "Hardware"
+
+
+def test_kinds_card_and_teach_choice():
+    s, scan, last = routing_setup("every", todoist=True)
+    scan("0003"); scan("0001")
+    fresh_pin_state()
+    c = unlocked_client()
+    html = c.get("/").get_data(as_text=True)
+    assert "Kinds of items" in html and html.index("<b>Food, Beverages &amp; Tobacco</b>") < html.index("<b>Hardware</b>")
+    c.post("/save", data={"has_kinds": "1", "sort_by_kind": "1",
+                          "kind_0": kinds.FOOD, "kind_section_0": "Groceries", "kind_stores_0": "1",
+                          "kind_1": "Hardware", "kind_section_1": "Home Depot run"})
+    assert kinds.settings(kinds.FOOD) == {"section": "Groceries", "stores": True}
+    assert kinds.settings("Hardware") == {"section": "Home Depot run", "stores": False}
+    page = c.get("/teach?barcode=0003").get_data(as_text=True)
+    assert "Automatic (Hardware)" in page and '<option value="Electronics"' in page
+    c.post("/teach/save", data={"barcode": "0003", "name": "Hammer", "kind": "Bogus Kind"})
+    assert "kind" not in teach.get("0003")                    # unknown kinds are refused
+    c.post("/teach/save", data={"barcode": "0003", "name": "Hammer", "kind": "Home & Garden"})
+    assert teach.get("0003")["kind"] == "Home & Garden"
 
 
 if __name__ == "__main__":
