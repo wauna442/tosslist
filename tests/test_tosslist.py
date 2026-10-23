@@ -5,6 +5,7 @@ Run with:  python3 tests/test_tosslist.py
 """
 import json, os, sys, tempfile, time
 os.environ["TOSSLIST_DATA_DIR"] = tempfile.mkdtemp()
+os.environ["TOSSLIST_LOCK_DIR"] = tempfile.mkdtemp()   # not /run: tests run as a normal user
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import requests
