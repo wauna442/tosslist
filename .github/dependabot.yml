@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Keep the CI building blocks up to date.
+  # Convention (from AetherSDR): actions are pinned to a full commit ID with no
+  # trailing "# vX" comment — Dependabot updates the ID but not such comments,
+  # so they'd drift and mislead. The version is in Dependabot's PR title.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3

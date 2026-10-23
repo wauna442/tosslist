@@ -1,0 +1,38 @@
+name: "📋 Proposal"
+description: Required before adding a store or service, a dependency, a new kind of credential, or changing default behavior.
+title: "[Proposal] "
+labels: ["proposal"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        No code until the maintainer approves this. See the "needs a proposal" list in GOVERNANCE.md.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's broken or missing.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you want to change. For a new store, link its official API documentation (Principle I).
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks
+      description: |
+        Cover each that applies: credentials stored and their scope (Principle II), any path to
+        spending money (Principle III), lost or doubled scans (Principle IV), privacy, new dependencies.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true

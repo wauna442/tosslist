@@ -1,0 +1,63 @@
+name: "🐞 Bug report"
+description: Something Tosslist did wrong, or didn't do.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Security problems go through SECURITY.md, not here.
+        **Don't paste API tokens, client secrets, or keys** — Tosslist never needs them in an issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you scanned or tapped, and what happened instead of what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Scan ...
+        2. Open http://tosslist.local ...
+        3. See ...
+    validations:
+      required: true
+  - type: checkboxes
+    id: destinations
+    attributes:
+      label: Which destinations were turned on?
+      options:
+        - label: Todoist list
+        - label: Fred Meyer cart
+        - label: Walmart list
+  - type: input
+    id: recent
+    attributes:
+      label: What did Recent scans say?
+      description: From the bottom of http://tosslist.local, including the barcode number if it's a matching problem.
+  - type: dropdown
+    id: light
+    attributes:
+      label: What did the green light do?
+      options:
+        - 2 quick blinks (added)
+        - 1 long blink (saved for later)
+        - 5 fast blinks (problem)
+        - Slow pulse (setup mode / not set up)
+        - Nothing / stayed off
+        - Didn't notice
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log (optional)
+      description: |
+        SSH into the Pi and run `journalctl -u tosslist -n 50 --no-pager`
+        (or `-u tosslist-setup` for the settings page). Paste the output.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: On the Pi, run `cd ~/tosslist && git log -1 --oneline`

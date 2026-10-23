@@ -1,0 +1,18 @@
+# Who must review changes. Tosslist has one maintainer, who owns everything.
+# With branch protection's "Require review from Code Owners" turned on, every
+# pull request needs @wauna442's approval.
+#
+# The governance and security files are listed separately on purpose: if more
+# reviewers are ever added to the line below, these stay maintainer-only
+# (the same idea as AetherSDR's Tier 1). Last matching line wins.
+
+*                       @wauna442
+
+# Governance and security — maintainer only
+/CONSTITUTION.md        @wauna442
+/GOVERNANCE.md          @wauna442
+/CONTRIBUTING.md        @wauna442
+/SECURITY.md            @wauna442
+/CODE_OF_CONDUCT.md     @wauna442
+/.github/CODEOWNERS     @wauna442
+/.github/workflows/     @wauna442
