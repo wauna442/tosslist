@@ -27,6 +27,7 @@ import alerts
 import barcode
 import common
 import kroger
+import scanner
 import walmart
 
 log = logging.getLogger("tosslist")
@@ -215,7 +216,7 @@ CARD_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  @media print { .actions, .back { display:none; } main { padding:0; max-width:7in; }
    .card svg { height:1.1in; } }
 </style></head><body><main>
-<p class="back"><a href="/">← Back to settings</a></p>
+<p class="back"><a href="/">← Back</a></p>
 <div class="card">
  <h1>{{ title }}</h1>
  {{ svg|safe }}
@@ -818,9 +819,14 @@ PAGE = """<!doctype html>
 {% if recent %}
 <div class="card" style="margin-top:14px">
  <h2>Recent scans</h2>
+ <p class="hint" style="margin-top:0">Scanned something by mistake? Tap Undo, or scan the
+ <a href="/undo-card">undo card</a>.</p>
  {% if queued %}<p class="hint">{{ queued }} waiting for internet.</p>{% endif %}
  <table>{% for r in recent %}<tr><td class="t">{{ r.time }}</td>
-  <td>{{ r.name or r.barcode }}<br><span class="hint">{{ r.result }}</span></td></tr>
+  <td>{{ r.name or r.barcode }}<br><span class="hint">{{ r.result }}</span></td>
+  <td style="width:1%">{% if r.kind == "scan" and r.id and not r.undone and r.ts and now - r.ts < undo_window %}
+   <form method="post" action="/undo"><input type="hidden" name="id" value="{{ r.id }}">
+    <button class="quiet" style="margin:0;padding:6px 10px;width:auto">Undo</button></form>{% endif %}</td></tr>
  {% endfor %}</table>
 </div>
 {% endif %}
@@ -885,6 +891,7 @@ def index():
         walmart_total=walmart.basket_total(wb["items"]),
         walmart_opened=wb.get("opened_at"),
         recent=common.read_json(common.RECENT_PATH, [])[:10],
+        now=time.time(), undo_window=scanner.UNDO_WINDOW,
         queued=common.queue_size())
 
 
@@ -1087,6 +1094,44 @@ phone to your home WiFi and visit <b>http://tosslist.local</b> anytime
 to change settings.</p>
 <p>If it couldn't connect, the <b>Tosslist Setup</b> network comes back
 in about a minute so you can try again.</p></body></html>"""
+
+
+# ---------- Undo (issue #8) — open to everyone, like the Walmart list ----------
+
+class _NoLight:
+    def __getattr__(self, name):
+        return lambda *a: None
+
+
+@app.route("/undo", methods=["POST"])
+def undo():
+    ok = scanner.undo_last(feedback or _NoLight(), entry_id=request.form.get("id", ""))
+    newest = common.read_json(common.RECENT_PATH, [{}])[0]
+    if ok:
+        state["message"] = "Undone: " + newest.get("result", "")
+    else:
+        state["error"] = "Couldn't undo: " + newest.get("result", "")
+    return redirect("/")
+
+
+UNDO_LINES = ["Scanned something by mistake? Scan this card right after, and Tosslist "
+              "takes it back out of Todoist and the Walmart list.",
+              "Scan it again to undo the scan before that. Fred Meyer doesn't let apps "
+              "remove cart items, so Recent scans will remind you to remove those in "
+              "the Fred Meyer app.",
+              "Tip: tape it to the side of the scanner or the trash can."]
+
+
+@app.route("/undo-card")
+def undo_card():
+    return card_page("Tosslist undo", scanner.UNDO_CODE, "Undo last scan", UNDO_LINES,
+                     "/undo-card.svg")
+
+
+@app.route("/undo-card.svg")
+def undo_card_svg():
+    return svg_download(barcode.svg(scanner.UNDO_CODE, label="Tosslist: undo last scan"),
+                        "tosslist-undo.svg")
 
 
 # ---------- Updates (issue #12) ----------
