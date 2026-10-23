@@ -209,7 +209,9 @@ class KrogerClient:
 
     # -- products --
     def find_product(self, barcode, location_id):
-        """Returns {"upc", "name", "price"} or None if not sold there."""
+        """Returns {"upc", "name", "price", "stock"} or None if not sold there.
+        "stock" is Kroger's stock level at that store: "HIGH", "LOW",
+        "TEMPORARILY_OUT_OF_STOCK", or None if Kroger didn't say."""
         cands = upc_candidates(barcode)
         if not cands:
             return None
@@ -219,7 +221,8 @@ class KrogerClient:
         for c in cands:
             p = found.get(c)
             if p:
-                return {"upc": c, "name": _product_name(p), "price": _price(p)}
+                return {"upc": c, "name": _product_name(p), "price": _price(p),
+                        "stock": _stock(p)}
         return None
 
     # -- cart --
@@ -240,6 +243,24 @@ def _product_name(p):
     name = (p.get("description") or "").strip()
     size = ((p.get("items") or [{}])[0].get("size") or "").strip()
     return f"{name} ({size})" if name and size else name
+
+
+def _stock(p):
+    inv = (p.get("items") or [{}])[0].get("inventory") or {}
+    level = inv.get("stockLevel")
+    return level.upper() if isinstance(level, str) and level else None
+
+
+def in_stock(product, low_counts=True):
+    """True / False, or None when Kroger gave no stock level."""
+    level = product.get("stock")
+    if level is None:
+        return None
+    if level == "TEMPORARILY_OUT_OF_STOCK":
+        return False
+    if level == "LOW":
+        return bool(low_counts)
+    return True
 
 
 def _price(p):

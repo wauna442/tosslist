@@ -44,6 +44,11 @@ DEFAULT_CONFIG = {
     # Walmart (app you create at walmart.io)
     "walmart_consumer_id": "",
     "walmart_key_version": "1",
+    # Store routing (issue #4)
+    "routing_rule": "every",          # every | first_in_stock | cheapest
+    "store_order": ["kroger", "walmart"],
+    "todoist_when": "always",         # always | fallback (only if no store took it)
+    "kroger_low_counts": True,        # Fred Meyer "low stock" counts as in stock
 }
 
 log = logging.getLogger("tosslist")
@@ -104,6 +109,16 @@ def kroger_connected(cfg):
 
 def kroger_ready(cfg):
     return kroger_connected(cfg) and bool(cfg.get("kroger_location_id"))
+
+
+STORES = ("kroger", "walmart")
+STORE_LABELS = {"kroger": "Fred Meyer", "walmart": "Walmart"}
+
+
+def store_order(cfg):
+    """The ranked store list, with any store missing from it appended."""
+    order = [s for s in (cfg.get("store_order") or []) if s in STORES]
+    return order + [s for s in STORES if s not in order]
 
 
 def walmart_ready(cfg):

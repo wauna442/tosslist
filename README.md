@@ -209,6 +209,46 @@ Tosslist never needs your Walmart password.
 
 ---
 
+## Optional — Store order and rules
+
+With more than one store set up, you can decide which store gets each scan.
+On **http://tosslist.local**, under **Store order and rules**:
+
+1. **Order your stores** with ↑ and ↓, most preferred first.
+2. **Pick a rule:**
+   - **Every store** (the default): each scan goes to every store that's on.
+   - **First in stock:** goes to the first store in your order that carries
+     it and has it in stock. Example: Fred Meyer first, Walmart second, so
+     anything out of stock at your Fred Meyer goes to the Walmart list.
+   - **Cheapest in stock:** goes to whichever store has it in stock for less.
+3. **Low stock:** choose whether "low stock" at your Fred Meyer counts as in
+   stock (checked) or moves the scan to your next store (unchecked).
+4. **Todoist:** add every scan, or **only if no store took it**, which is handy
+   for things neither store carries.
+5. Tap **Save**.
+
+### Good to know
+
+- **Try a rule before switching.** While you're on Every store, Recent scans
+  shows which store each other rule would have picked, for example
+  "Would pick: First in stock → Walmart, Cheapest → Fred Meyer". Watch it for
+  a week to see whether Fred Meyer's stock information matches the shelves.
+- **Recent scans explains each decision**, for example
+  "First in stock → Walmart. Fred Meyer: out of stock · Walmart: on Walmart
+  list ($2.25)".
+- **No internet means wait, not skip.** If a store can't be reached, the scan
+  waits and is decided once the internet is back. A network hiccup never
+  sends your groceries to your second-choice store.
+- **A sign-in problem does move on.** If a store's sign-in has expired, the
+  scan goes to your next store, and Recent scans says so. Reconnect that
+  store on the settings page.
+- **Walmart stock and prices are walmart.com's**, not your local store's.
+  Fred Meyer's are for the store you picked.
+- **"Stock not reported"** counts as in stock: if a store doesn't say, it's
+  treated as having it.
+
+---
+
 ## What the green light means
 
 | Light | Meaning |

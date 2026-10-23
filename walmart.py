@@ -123,7 +123,9 @@ class WalmartClient:
         return r.json()
 
     def find_product(self, barcode):
-        """Returns {"item_id", "name", "price"} or None if Walmart doesn't know it."""
+        """Returns {"item_id", "name", "price", "stock"} or None if Walmart
+        doesn't know it. "stock" is walmart.com availability text, e.g.
+        "Available" or "Not available" (not your local store)."""
         for upc in upc_candidates(barcode):
             data = self._get("/items", {"upc": upc})
             if not data:
@@ -136,7 +138,8 @@ class WalmartClient:
                     price = it.get("salePrice") or it.get("msrp")
                     return {"item_id": str(it["itemId"]),
                             "name": (it.get("name") or "").strip(),
-                            "price": float(price) if price else None}
+                            "price": float(price) if price else None,
+                            "stock": (it.get("stock") or None)}
         return None
 
     def check(self):
@@ -145,6 +148,14 @@ class WalmartClient:
 
 
 # ---------- the Walmart list kept on the device ----------
+
+def in_stock(product):
+    """True / False, or None when Walmart gave no availability."""
+    stock = (product.get("stock") or "").strip().lower()
+    if not stock:
+        return None
+    return not (stock.startswith("not") or "out of stock" in stock)
+
 
 def basket():
     return common.read_json(BASKET_PATH, {"items": [], "opened_at": None})

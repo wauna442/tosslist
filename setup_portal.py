@@ -216,6 +216,15 @@ def check_token(token):
 
 # ---------- web pages ----------
 
+RULE_OPTIONS = [
+    ("every", "Every store",
+     "Each scan goes to every store that's on."),
+    ("first_in_stock", "First in stock",
+     "Goes to the first store in your order that carries it and has it in stock."),
+    ("cheapest", "Cheapest in stock",
+     "Goes to whichever store has it in stock for less. Walmart prices are walmart.com prices."),
+]
+
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -254,6 +263,7 @@ PAGE = """<!doctype html>
  a.btn { display:block; text-align:center; text-decoration:none; padding:13px;
    border-radius:10px; background:var(--accent); color:#fff; font-weight:600; margin-top:10px; }
  button.quiet { background:transparent; color:var(--muted); border:1px solid var(--line); }
+ button:disabled { opacity:.3; }
  .row { display:flex; gap:8px; } .row > * { flex:1; }
 </style></head><body><main>
 <h1>Tosslist</h1>
@@ -312,7 +322,41 @@ PAGE = """<!doctype html>
   <label class="check"><input type="checkbox" name="send_to_walmart" value="1"
    {% if send_to_walmart %}checked{% endif %}><div>Walmart list
    <span>{% if walmart_ready %}Ready · open it in your Walmart cart below{% else %}Set up below{% endif %}</span></div></label>
-  <p class="hint">Turn on any mix. Each scan goes to everything that's on.</p>
+  <p class="hint">Turn on any mix. The rules below decide which stores get each scan.</p>
+ </div>
+
+ <div class="card">
+  <h2>Store order and rules</h2>
+  <input type="hidden" name="has_rules" value="1">
+  <p class="hint" style="margin-top:0">Your stores, most preferred first.</p>
+  <table>{% for st in store_rows %}<tr>
+   <td style="width:1.6em">{{ loop.index }}.</td>
+   <td>{{ st.label }}<br><span class="hint">{% if st.ready %}{% if st.on %}On{% else %}Off{% endif %}{% else %}Not set up{% endif %}</span></td>
+   <td style="width:1%;white-space:nowrap">
+    <button class="quiet" name="move" value="{{ st.key }}:up" style="margin:0;padding:6px 10px;width:auto"
+     {% if loop.first %}disabled{% endif %} aria-label="Move {{ st.label }} up">↑</button>
+    <button class="quiet" name="move" value="{{ st.key }}:down" style="margin:0;padding:6px 10px;width:auto"
+     {% if loop.last %}disabled{% endif %} aria-label="Move {{ st.label }} down">↓</button></td></tr>
+  {% endfor %}</table>
+
+  <label style="margin-top:16px">Which stores get each scan</label>
+  {% for key, title, desc in rule_options %}
+  <label class="check"><input type="radio" name="routing_rule" value="{{ key }}"
+   {% if routing_rule == key %}checked{% endif %}><div>{{ title }}<span>{{ desc }}</span></div></label>
+  {% endfor %}
+
+  <label class="check" style="margin-top:16px"><input type="checkbox" name="kroger_low_counts" value="1"
+   {% if kroger_low_counts %}checked{% endif %}><div>Count "low stock" at Fred Meyer as in stock
+   <span>Unchecked: low stock also moves a scan to your next store.</span></div></label>
+
+  <label for="todoist_when" style="margin-top:16px">Todoist, when it's on</label>
+  <select id="todoist_when" name="todoist_when">
+   <option value="always" {% if todoist_when == "always" %}selected{% endif %}>Always add to Todoist</option>
+   <option value="fallback" {% if todoist_when == "fallback" %}selected{% endif %}>Only if no store took it</option>
+  </select>
+  <p class="hint">Recent scans shows why each scan went where it did. While
+  you're on "Every store", it also shows which store each other rule would
+  have picked, so you can try a rule before switching.</p>
  </div>
  {% endif %}
 
@@ -479,6 +523,15 @@ def index():
         kroger_store=cfg.get("kroger_location_name", ""),
         kroger_location_id=cfg.get("kroger_location_id", ""),
         stores=state["stores"], zip=state["zip"],
+        store_rows=[{"key": k, "label": common.STORE_LABELS[k],
+                     "on": bool(cfg.get(f"send_to_{k}")),
+                     "ready": (common.kroger_ready(cfg) if k == "kroger"
+                               else common.walmart_ready(cfg))}
+                    for k in common.store_order(cfg)],
+        rule_options=RULE_OPTIONS,
+        routing_rule=cfg.get("routing_rule", "every"),
+        kroger_low_counts=cfg.get("kroger_low_counts", True),
+        todoist_when=cfg.get("todoist_when", "always"),
         send_to_walmart=cfg.get("send_to_walmart", False),
         walmart_ready=common.walmart_ready(cfg),
         walmart_consumer_id=cfg.get("walmart_consumer_id", ""),
@@ -529,6 +582,22 @@ def save():
     kv = f.get("walmart_key_version", "").strip()
     if kv:
         updates["walmart_key_version"] = kv
+    if f.get("has_rules"):
+        if f.get("routing_rule") in {k for k, _, _ in RULE_OPTIONS}:
+            updates["routing_rule"] = f["routing_rule"]
+        if f.get("todoist_when") in ("always", "fallback"):
+            updates["todoist_when"] = f["todoist_when"]
+        updates["kroger_low_counts"] = f.get("kroger_low_counts") == "1"
+    move = f.get("move", "")
+    if ":" in move:
+        key, direction = move.split(":", 1)
+        order = common.store_order(common.load_config())
+        if key in order and direction in ("up", "down"):
+            i = order.index(key)
+            j = i - 1 if direction == "up" else i + 1
+            if 0 <= j < len(order):
+                order[i], order[j] = order[j], order[i]
+                updates["store_order"] = order
     cfg = common.save_config(updates)
 
     ssid = (f.get("ssid_manual", "").strip() or f.get("ssid", "").strip())
@@ -552,6 +621,9 @@ def save():
         if not any(cfg.get(k) for k in ("send_to_todoist", "send_to_kroger", "send_to_walmart")):
             notes.append("Every destination is off, so scans won't go anywhere.")
         state["message"] = "Saved. " + " ".join(notes) if notes else "Saved."
+        if cfg.get("routing_rule", "every") != "every" and not (
+                common.kroger_ready(cfg) or common.walmart_ready(cfg)):
+            state["message"] += (" Store rules only matter once a store is set up.")
         if feedback:
             feedback.ready() if common.is_configured(cfg) else feedback.setup_mode()
     return redirect("/")

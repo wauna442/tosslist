@@ -189,9 +189,22 @@ class TodoistClient:
 
 
 # ---------- what happens on each scan ----------
+#
+# Routing rules (chosen on tosslist.local, see issue #4):
+#   every           - every store that's on gets the item (the default)
+#   first_in_stock  - stores are tried in your order; the first that carries
+#                     it and has it in stock gets it
+#   cheapest        - of the stores that have it in stock, the cheapest gets it
+# Todoist is separate: always, or only when no store took the item.
+#
+# Principle IV: if a store can't be reached, the scan waits and retries. It
+# never falls through to the next store because of a network problem.
 
+STORES = common.STORES
 LABELS = {"todoist": "Todoist", "kroger": "Fred Meyer", "walmart": "Walmart"}
-ORDER = ("kroger", "walmart", "todoist")   # stores first: they can supply the name
+RULES = {"every": "Every store", "first_in_stock": "First in stock",
+         "cheapest": "Cheapest in stock"}
+TOOK_IT = ("added", "maybe", "listed")
 RESULT_TEXT = {
     "added": "added",
     "duplicate": "already on list",
@@ -200,7 +213,13 @@ RESULT_TEXT = {
     "listed": "on Walmart list",
     "maybe": "may have been added, check cart",
     "auth": "sign-in problem, check settings",
+    "out_of_stock": "out of stock",
+    "passed": "had it, another store was picked",
+    "not_needed": "skipped, a store had it",
 }
+
+
+store_order = common.store_order
 
 
 def _todoist(item, cfg, todoist_factory):
@@ -218,73 +237,202 @@ def _todoist(item, cfg, todoist_factory):
     return "added"
 
 
-def _kroger_send(item, cfg, kroger_factory):
-    client = (kroger_factory or kroger.KrogerClient)(cfg)
-    product = client.find_product(item["barcode"], cfg["kroger_location_id"])
-    if product is None:
-        return "not_found"
-    item["kroger_name"], item["price"] = product["name"], product["price"]
-    item.setdefault("store_name", product["name"])
-    try:
-        client.add_to_cart(product["upc"], 1, cfg.get("kroger_modality", "PICKUP"))
-    except requests.ReadTimeout:
-        # The request went out but no answer came back. Kroger can't tell us
-        # what's in the cart, and resending could add it twice.
-        return "maybe"
-    return "added"
+class _Stores:
+    """Looks things up at each store (safe to repeat) and adds to it (not)."""
+
+    def __init__(self, cfg, kroger_factory=None, walmart_factory=None):
+        self.cfg = cfg
+        self.factories = {"kroger": kroger_factory or kroger.KrogerClient,
+                          "walmart": walmart_factory or walmart.WalmartClient}
+        self.clients = {}
+
+    def client(self, store):
+        if store not in self.clients:
+            self.clients[store] = self.factories[store](self.cfg)
+        return self.clients[store]
+
+    def lookup(self, store, item):
+        """Returns the product (or None) and records a check on the item:
+        {"found", "in_stock" (True/False/None), "price"}."""
+        if store == "kroger":
+            product = self.client(store).find_product(
+                item["barcode"], self.cfg["kroger_location_id"])
+            avail = kroger.in_stock(product, self.cfg.get("kroger_low_counts", True)) \
+                if product else None
+        else:
+            product = self.client(store).find_product(item["barcode"])
+            avail = walmart.in_stock(product) if product else None
+        item.setdefault("checks", {})[store] = {
+            "found": product is not None, "in_stock": avail,
+            "price": product.get("price") if product else None}
+        if product:
+            item.setdefault("store_name", product["name"])
+        return product
+
+    def add(self, store, item, product):
+        if store == "kroger":
+            try:
+                self.client(store).add_to_cart(
+                    product["upc"], 1, self.cfg.get("kroger_modality", "PICKUP"))
+            except requests.ReadTimeout:
+                # The request went out but no answer came back. Kroger can't
+                # tell us what's in the cart, and resending could add it twice.
+                return "maybe"
+            return "added"
+        walmart.basket_add(product, item["barcode"])
+        return "listed"
 
 
-def _walmart_send(item, cfg, walmart_factory):
-    client = (walmart_factory or walmart.WalmartClient)(cfg)
-    product = client.find_product(item["barcode"])
-    if product is None:
-        return "not_found_walmart"
-    item["walmart_price"] = product["price"]
-    item.setdefault("store_name", product["name"])
-    walmart.basket_add(product, item["barcode"])
-    return "listed"
+def _not_found(store):
+    return "not_found" if store == "kroger" else "not_found_walmart"
+
+
+def _available(check):
+    """Usable for routing: carried, and not reported out of stock.
+    Unknown stock counts as available, since the store didn't say."""
+    return check["found"] and check["in_stock"] is not False
+
+
+def pick_first(checks, order):
+    for s in order:
+        if s in checks and _available(checks[s]):
+            return s
+    return None
+
+
+def pick_cheapest(checks, order):
+    avail = [s for s in order if s in checks and _available(checks[s])]
+    priced = [s for s in avail if checks[s]["price"]]
+    if priced:
+        return min(priced, key=lambda s: (checks[s]["price"], order.index(s)))
+    return avail[0] if avail else None
+
+
+def _route(item, cfg, stores, results):
+    rule, order = item["rule"], item["route_stores"]
+    pick = pick_first if rule == "first_in_stock" else pick_cheapest
+    for s in order:                      # a retry starts the decision over
+        results.pop(s, None)
+    item.pop("chosen", None)
+    item["checks"] = {}
+    products, looked, excluded = {}, set(), set()
+
+    def usable():
+        return {s: c for s, c in item["checks"].items()
+                if s in order and s not in excluded}
+
+    while True:
+        for s in order:
+            if s in looked or s in excluded:
+                continue
+            if rule == "first_in_stock" and pick(usable(), order):
+                break                    # an earlier store has it; stop asking
+            looked.add(s)
+            try:
+                products[s] = stores.lookup(s, item)
+            except (kroger.KrogerAuthError, walmart.WalmartAuthError) as e:
+                log.error("%s: %s", LABELS[s], e)
+                results[s] = "auth"
+                excluded.add(s)
+                continue
+            check = item["checks"][s]
+            if not check["found"]:
+                results[s] = _not_found(s)
+            elif check["in_stock"] is False:
+                results[s] = "out_of_stock"
+        chosen = pick(usable(), order)
+        if chosen is None:
+            return
+        try:
+            results[chosen] = stores.add(chosen, item, products[chosen])
+        except (kroger.KrogerAuthError, walmart.WalmartAuthError) as e:
+            # Its sign-in failed: nothing was added there, so try the next store.
+            log.error("%s: %s", LABELS[chosen], e)
+            results[chosen] = "auth"
+            excluded.add(chosen)
+            continue
+        item["chosen"] = chosen
+        for s, c in usable().items():
+            if s != chosen and _available(c):
+                results[s] = "passed"
+        return
 
 
 def send_item(item, cfg, todoist_factory=None, kroger_factory=None,
               walmart_factory=None):
-    """Send one scan to each destination still pending for it.
-    Records results in item["results"]. Raises requests.RequestException
-    (no internet) with the unfinished destinations left in item["pending"]."""
+    """Work through the scan's pending steps. Records results in
+    item["results"]. Raises requests.RequestException (no internet) with
+    the unfinished steps left in item["pending"]."""
     item.setdefault("pending", ["todoist"])     # items queued by older versions
+    item.setdefault("rule", "every")
     results = item.setdefault("results", {})
-    for dest in ORDER:
-        if dest not in item["pending"]:
-            continue
+    stores = _Stores(cfg, kroger_factory, walmart_factory)
+    steps = [st for st in item["pending"] if st in STORES]
+    steps += [st for st in item["pending"] if st == "route"]
+    steps += [st for st in item["pending"] if st == "todoist"]
+    for step in steps:
         try:
-            if dest == "kroger":
-                results[dest] = _kroger_send(item, cfg, kroger_factory)
-            elif dest == "walmart":
-                results[dest] = _walmart_send(item, cfg, walmart_factory)
+            if step == "route":
+                _route(item, cfg, stores, results)
+            elif step in STORES:               # "every store" rule
+                product = stores.lookup(step, item)
+                results[step] = (stores.add(step, item, product) if product
+                                 else _not_found(step))
+            elif (item.get("todoist_when") == "fallback"
+                  and any(results.get(s) in TOOK_IT for s in STORES)):
+                results["todoist"] = "not_needed"
             else:
-                results[dest] = _todoist(item, cfg, todoist_factory)
+                results["todoist"] = _todoist(item, cfg, todoist_factory)
         except (TodoistAuthError, kroger.KrogerAuthError,
                 walmart.WalmartAuthError) as e:
-            log.error("%s: %s", LABELS[dest], e)
-            results[dest] = "auth"
-        item["pending"].remove(dest)
+            log.error("%s: %s", LABELS.get(step, step), e)
+            results[step] = "auth"
+        item["pending"].remove(step)
     if not item.get("name"):
         item["name"] = item.get("store_name")
     return results
 
 
+def _store_text(item, s, code):
+    text = f"{LABELS[s]}: {RESULT_TEXT[code]}"
+    check = item.get("checks", {}).get(s) or {}
+    price = check.get("price") or (item.get("price") if s == "kroger" else
+                                   item.get("walmart_price"))
+    if price and code in TOOK_IT + ("passed",):
+        text += f" (${price:.2f})"
+    if check.get("in_stock") is False and code in TOOK_IT:
+        text += ", shown as out of stock"
+    return text
+
+
 def summarize(item):
+    results = item.get("results", {})
     parts = []
-    for dest in ("todoist", "kroger", "walmart"):
-        if dest in item.get("results", {}):
-            text = f"{LABELS[dest]}: {RESULT_TEXT[item['results'][dest]]}"
-            if dest == "kroger" and item.get("price") and item["results"][dest] in ("added", "maybe"):
-                text += f" (${item['price']:.2f})"
-            if dest == "walmart" and item.get("walmart_price") and item["results"][dest] == "listed":
-                text += f" (${item['walmart_price']:.2f})"
-            parts.append(text)
-    for dest in item.get("pending", []):
-        parts.append(f"{LABELS[dest]}: waiting for internet")
-    return " · ".join(parts)
+    if "todoist" in results:
+        parts.append(f"Todoist: {RESULT_TEXT[results['todoist']]}")
+    order = item.get("route_stores") or list(STORES)
+    for s in order:
+        if s in results:
+            parts.append(_store_text(item, s, results[s]))
+    for step in item.get("pending", []):
+        label = RULES.get(item.get("rule"), "Stores") if step == "route" else LABELS[step]
+        parts.append(f"{label}: waiting for internet")
+    text = " · ".join(parts)
+    rule = item.get("rule", "every")
+    if rule != "every" and "route" not in item.get("pending", []):
+        if item.get("chosen"):
+            text = f"{RULES[rule]} → {LABELS[item['chosen']]}. " + text
+        else:
+            text = f"{RULES[rule]}: no store had it. " + text
+    elif rule == "every":
+        checks = {s: c for s, c in item.get("checks", {}).items()}
+        if len(checks) >= 2:
+            first = pick_first(checks, order)
+            cheap = pick_cheapest(checks, order)
+            text += (" · Would pick: First in stock → "
+                     f"{LABELS[first] if first else 'none'}, Cheapest → "
+                     f"{LABELS[cheap] if cheap else 'none'}")
+    return text
 
 
 def handle_scan(barcode, feedback, todoist_factory=None, kroger_factory=None,
@@ -299,11 +447,20 @@ def handle_scan(barcode, feedback, todoist_factory=None, kroger_factory=None,
         feedback.error()
         return "not configured"
 
+    rule = cfg.get("routing_rule", "every")
+    if rule not in RULES:
+        rule = "every"
+    stores = [s for s in store_order(cfg) if s in dests]
+    pending = list(stores) if rule == "every" else (["route"] if stores else [])
+    if "todoist" in dests:
+        pending.append("todoist")
     item = {"id": str(uuid.uuid4()), "barcode": barcode, "name": None,
-            "pending": list(dests), "results": {}}
+            "pending": pending, "results": {}, "rule": rule,
+            "route_stores": stores,
+            "todoist_when": cfg.get("todoist_when", "always")}
     try:
         results = send_item(item, cfg, todoist_factory, kroger_factory, walmart_factory)
-        if any(r in ("added", "duplicate", "maybe", "listed") for r in results.values()):
+        if any(r in TOOK_IT + ("duplicate",) for r in results.values()):
             feedback.success()
         else:
             feedback.error()
