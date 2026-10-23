@@ -9,7 +9,7 @@ os.environ["TOSSLIST_LOCK_DIR"] = tempfile.mkdtemp()   # not /run: tests run as 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import requests
-import common, scanner, setup_portal, kroger, walmart
+import common, scanner, setup_portal, kroger, walmart, alerts
 
 
 class FakeFeedback:
@@ -66,10 +66,17 @@ class FakeSession:
                 p = {"id": f"p{len(self.projects)}", "name": kw["json"]["name"]}
                 self.projects.append(p); return Resp(200, p)
             if method == "GET" and path == "/tasks":
-                return Resp(200, {"results": [t for t in self.tasks if t["project_id"] == kw["params"]["project_id"]], "next_cursor": None})
+                return Resp(200, {"results": [t for t in self.tasks if t["project_id"] == kw["params"]["project_id"]
+                                              and not t.get("closed")], "next_cursor": None})
             if method == "POST" and path == "/tasks":
                 assert "X-Request-Id" in kw["headers"]
-                self.tasks.append(kw["json"]); return Resp(200, kw["json"])
+                task = dict(kw["json"], id=f"task{len(self.tasks) + 1}")
+                self.tasks.append(task); return Resp(200, task)
+            if method == "POST" and path.startswith("/tasks/") and path.endswith("/close"):
+                tid = path.split("/")[2]
+                for t in self.tasks:
+                    if t["id"] == tid: t["closed"] = True
+                return Resp(204)
         if "api.kroger.com" in url:
             return self.kroger(method, url.split("/v1")[1], kw)
         if "developer.api.walmart.com" in url:
@@ -165,7 +172,8 @@ def unlocked_client():
 
 def reset():
     for p in (common.CONFIG_PATH, common.QUEUE_PATH, common.CACHE_PATH, common.RECENT_PATH,
-              common.KROGER_TOKEN_PATH, common.WALMART_BASKET_PATH):
+              common.KROGER_TOKEN_PATH, common.WALMART_BASKET_PATH, common.UPDATE_STATUS_PATH,
+              alerts.PROBLEMS_PATH, alerts.ALERTS_PATH):
         if os.path.exists(p): os.remove(p)
 
 
@@ -1132,6 +1140,100 @@ def test_reset_card_scanned_on_device_clears_pin():
     assert "PIN cleared" in common.read_json(common.RECENT_PATH, [])[0]["result"]
     assert "Create a PIN" in setup_portal.app.test_client().get("/").get_data(as_text=True)
     assert setup_portal.app.config["SESSION_COOKIE_SAMESITE"] == "Lax"
+
+
+# ---------------- Todoist alerts (issue #10) ----------------
+
+def alert_setup():
+    reset()
+    s = FakeSession()
+    common.save_config({"todoist_token": "t", "send_to_kroger": True, "kroger_client_id": "cid",
+                        "kroger_client_secret": "sec", "kroger_location_id": "70100123"})
+    common.write_json(common.KROGER_TOKEN_PATH, {"access_token": "x", "refresh_token": "dead",
+                                                 "expires_at": 0})
+    tf = lambda t: scanner.TodoistClient(t, s)
+    kf = lambda cfg: kroger.KrogerClient(cfg, s)
+    return s, tf, kf
+
+
+def open_tasks(s):
+    return [t for t in s.tasks if not t.get("closed")]
+
+
+def test_note_writes_only_on_change():
+    reset()
+    writes = []
+    orig = common.write_json
+    common.write_json = lambda p, d: (writes.append(p), orig(p, d))
+    try:
+        alerts.note("kroger", True); alerts.note("kroger", True); alerts.note("kroger", True)
+        alerts.note("kroger", False); alerts.note("kroger", False)
+        alerts.note("kroger", True)
+    finally:
+        common.write_json = orig
+    assert writes.count(alerts.PROBLEMS_PATH) == 3
+
+
+def test_broken_sign_in_raises_and_clears_a_p1_alert():
+    s, tf, kf = alert_setup()
+    scanner.handle_scan("011110417005", FakeFeedback(), tf, kf)   # FM sign-in is dead
+    cfg = common.load_config()
+    assert "kroger_auth" in alerts.active_problems(cfg)
+    opened, closed = alerts.sync(cfg, tf)
+    assert opened == ["kroger_auth"]
+    alert = [t for t in open_tasks(s) if t["content"].startswith("⚠️ Tosslist")][0]
+    assert alert["content"] == "⚠️ Tosslist: Reconnect Fred Meyer"
+    assert alert["priority"] == 4 and alert["due_string"] == "today"
+    assert "Connect Fred Meyer account" in alert["description"]
+    assert alerts.sync(cfg, tf) == ([], [])                      # no duplicate
+    # it's fixed: reconnected, and a scan goes through
+    common.write_json(common.KROGER_TOKEN_PATH, {"access_token": "user1", "refresh_token": "r1",
+                                                 "expires_at": time.time() + 1800})
+    scanner.handle_scan("011110417005", FakeFeedback(), tf, kf)
+    assert alerts.sync(cfg, tf) == ([], ["kroger_auth"])
+    assert not [t for t in open_tasks(s) if t["content"].startswith("⚠️")]
+
+
+def test_other_problems_and_settings():
+    s, tf, kf = alert_setup()
+    common.write_json(alerts.PROBLEMS_PATH, {})
+    common.queue_add({"id": "q1", "barcode": "1", "pending": ["todoist"], "queued_at": time.time() - 3 * 3600})
+    common.write_json(common.UPDATE_STATUS_PATH, {"time": "t", "result": "failed",
+                                                  "message": "No internet.", "version": "v1"})
+    cfg = common.load_config()
+    problems = alerts.active_problems(cfg)
+    assert problems == {"queue_stuck": {"n": 1}, "update_failed": {"message": "No internet."}}
+    opened, _ = alerts.sync(cfg, tf)
+    assert sorted(opened) == ["queue_stuck", "update_failed"]
+    texts = " ".join(t["description"] for t in open_tasks(s))
+    assert "1 scan(s) have been waiting" in texts and "The last update stopped: No internet." in texts
+    # a freshly queued scan isn't "stuck"
+    common.write_json(common.QUEUE_PATH, [{"id": "q2", "queued_at": time.time()}])
+    common.write_json(common.UPDATE_STATUS_PATH, {"result": "ok"})
+    assert alerts.sync(cfg, tf) == ([], ["queue_stuck", "update_failed"])
+    # alerts turned off: nothing is sent
+    common.save_config({"send_alerts": False})
+    common.write_json(common.UPDATE_STATUS_PATH, {"result": "failed", "message": "x"})
+    assert alerts.sync(common.load_config(), tf) == ([], [])
+
+
+def test_alerts_wait_for_todoist_when_offline():
+    s, tf, kf = alert_setup()
+    common.write_json(common.UPDATE_STATUS_PATH, {"result": "failed", "message": "x"})
+    s.offline = True
+    assert alerts.sync(common.load_config(), tf) == ([], [])
+    s.offline = False
+    assert alerts.sync(common.load_config(), tf) == (["update_failed"], [])
+
+
+def test_needs_attention_card_on_settings_page():
+    s, tf, kf = alert_setup()
+    scanner.handle_scan("011110417005", FakeFeedback(), tf, kf)
+    html = setup_portal.app.test_client().get("/").get_data(as_text=True)
+    assert "Needs attention" in html and "Reconnect Fred Meyer" in html
+    c = unlocked_client()
+    c.post("/save", data={"has_updates": "1", "auto_update": "1"})
+    assert common.load_config()["send_alerts"] is False and common.load_config()["auto_update"] is True
 
 
 if __name__ == "__main__":

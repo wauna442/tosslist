@@ -23,6 +23,7 @@ import time
 import requests
 from flask import Flask, Response, redirect, render_template_string, request, session
 
+import alerts
 import barcode
 import common
 import kroger
@@ -530,6 +531,9 @@ PAGE = """<!doctype html>
  {% if configured %}· <span class="ok">ready to scan</span>{% endif %}</p>
 
 {% if data_warning %}<div class="card bad">{{ data_warning }}</div>{% endif %}
+{% if problems %}<div class="card"><h2 class="bad" style="margin-bottom:6px">Needs attention</h2>
+ {% for p in problems %}<p style="margin:6px 0"><b>{{ p.title }}.</b> <span class="hint">{{ p.text }}</span></p>{% endfor %}
+</div>{% endif %}
 {% if message %}<div class="card ok">{{ message }}</div>{% endif %}
 {% if error %}<div class="card bad">{{ error }}</div>{% endif %}
 
@@ -684,11 +688,14 @@ PAGE = """<!doctype html>
  </div>
 
  <div class="card">
-  <h2>Automatic updates</h2>
+  <h2>Updates and alerts</h2>
   <input type="hidden" name="has_updates" value="1">
   <label class="check" style="margin-top:0"><input type="checkbox" name="auto_update" value="1"
    {% if auto_update %}checked{% endif %}><div>Install new releases each night
    <span>Checks GitHub around 3:30–4:15 AM. Only reviewed, released versions are installed.</span></div></label>
+  <label class="check"><input type="checkbox" name="send_alerts" value="1"
+   {% if send_alerts %}checked{% endif %}><div>Alert me in Todoist when Tosslist needs attention
+   <span>Adds a red (priority 1) task due today, like "Reconnect Fred Meyer", and closes it by itself once it's fixed.</span></div></label>
  </div>
 
  <div class="card">
@@ -851,6 +858,9 @@ def index():
         kroger_location_id=cfg.get("kroger_location_id", ""),
         stores=state["stores"], zip=state["zip"],
         data_warning=common.DATA_WARNING,
+        problems=[{"title": alerts.TITLES[k], "text": alerts.HOW_TO_FIX[k].format(**d)}
+                  for k, d in alerts.active_problems(cfg).items() if k != "data_lost"],
+        send_alerts=cfg.get("send_alerts", True),
         pin_set=bool(pin_info()), unlocked=unlocked(), unlock_minutes=UNLOCK_MINUTES,
         version=common.app_file("VERSION", "unknown"),
         read_only=common.read_only_active(),
@@ -918,6 +928,7 @@ def save():
         updates["walmart_key_version"] = kv
     if f.get("has_updates"):
         updates["auto_update"] = f.get("auto_update") == "1"
+        updates["send_alerts"] = f.get("send_alerts") == "1"
     if f.get("has_rules"):
         if f.get("routing_rule") in {k for k, _, _ in RULE_OPTIONS}:
             updates["routing_rule"] = f["routing_rule"]
@@ -996,6 +1007,7 @@ def _finish_connect(code, key):
     except requests.RequestException:
         state["error"] = "Couldn't reach Kroger. Check the internet and try again."
         return redirect("/")
+    alerts.note("kroger", True)
     cfg = common.load_config()
     state["message"] = ("Fred Meyer connected. " +
                         ("" if cfg.get("kroger_location_id") else "Now pick your store. ") +
@@ -1126,8 +1138,10 @@ def walmart_check():
         return redirect("/")
     try:
         walmart.WalmartClient(cfg).check()
+        alerts.note("walmart", True)
         state["message"] = "Walmart accepted the connection ✓"
     except walmart.WalmartAuthError:
+        alerts.note("walmart", False)
         state["error"] = ("Walmart didn't accept it. Check the Consumer ID and key "
                           "version, and that this public key is the one on walmart.io. "
                           "New keys can take a few minutes to start working.")
