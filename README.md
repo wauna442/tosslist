@@ -5,9 +5,11 @@ shared Todoist list that you and your partner both see, in your Fred Meyer
 cart, on a Walmart list you open in your Walmart cart, or any mix of those.
 You choose on the settings page.
 
-Plan on about 45 minutes the first time. You need: the Raspberry Pi, its power
-supply, the microSD card, the OTG adapter, the barcode scanner, and a computer
-with an SD card slot (or a USB SD card reader).
+Plan on about 40 minutes the first time. You need: the Raspberry Pi, its power
+supply, the microSD card, the OTG adapter, the barcode scanner, a computer
+with an SD card slot (or a USB SD card reader), and your home WiFi password.
+Tosslist downloads straight from GitHub, so there's nothing to copy onto the
+card yourself.
 
 ---
 
@@ -38,18 +40,7 @@ with an SD card slot (or a USB SD card reader).
 
 ---
 
-## Step 3 — Copy this project onto the SD card (2 min)
-
-When Imager finishes, the card usually shows up on your computer as a drive
-named **bootfs**. (If it doesn't, unplug the card and plug it back in.)
-
-1. Unzip the `tosslist.zip` file you got from Claude.
-2. Drag the whole **tosslist** folder onto the **bootfs** drive.
-3. Eject the card properly (right-click → Eject), then remove it.
-
----
-
-## Step 4 — Start the Pi (5 min)
+## Step 3 — Start the Pi (5 min)
 
 1. Put the SD card in the Pi.
 2. Plug the barcode scanner into the Pi's **data** USB port using the OTG
@@ -59,7 +50,7 @@ named **bootfs**. (If it doesn't, unplug the card and plug it back in.)
 
 ---
 
-## Step 5 — Install the scanner software (10 min)
+## Step 4 — Install Tosslist from GitHub (10 min)
 
 You'll type commands into the Pi from your computer. This is called **SSH**.
 
@@ -77,18 +68,36 @@ ssh yourname@tosslist.local
 - Type your Pi password. **Nothing appears on screen while you type**. That's
   normal. Press Enter.
 
-You're now controlling the Pi. Run the installer:
+You're now controlling the Pi. Run these three commands, one at a time,
+pressing Enter after each:
 
 ```
-sudo bash /boot/firmware/tosslist/install.sh
+sudo apt-get install -y git
 ```
 
-It downloads what it needs and finishes with **"All done."** You can close the
-window afterwards.
+```
+git clone https://github.com/wauna442/tosslist.git ~/tosslist
+```
+
+```
+sudo bash ~/tosslist/install.sh
+```
+
+What they do:
+1. Installs **git**, the tool that talks to GitHub.
+2. **Clones** (downloads) Tosslist from GitHub into a `tosslist` folder in your
+   home folder on the Pi. This copy is also how you'll get updates later.
+3. Runs the installer. It downloads what Tosslist needs and finishes with
+   **"All done."** You can close the window afterwards.
+
+> **If the repo is private,** the clone command asks for a GitHub username and password.
+> GitHub doesn't accept your normal password there. Either make the repo public
+> (it contains no passwords or keys) or create a personal access token on
+> GitHub and paste that as the password.
 
 ---
 
-## Step 6 — Connect it to Todoist (3 min)
+## Step 5 — Connect it to Todoist (3 min)
 
 1. On your phone or computer (on your home WiFi), open
    **http://tosslist.local**
@@ -241,7 +250,7 @@ anything scanned while offline is kept and sent once the internet is back.
 
 ## Updating Tosslist
 
-When there's a new version on GitHub, SSH in (Step 5) and run:
+When there's a new version on GitHub, SSH in (Step 4) and run:
 
 ```
 cd ~/tosslist && git pull && sudo bash install.sh
@@ -262,7 +271,7 @@ Walmart list are kept.
 - **Item shows as "Unknown item 0123…":** the product isn't in the free
   databases. Rename it in Todoist. Next time it'll still say unknown, but your
   list is still useful.
-- **See what the device is doing:** SSH in (Step 5) and run
+- **See what the device is doing:** SSH in (Step 4) and run
   `journalctl -u tosslist -f` . Press Ctrl+C to stop watching.
 
 ---

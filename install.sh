@@ -1,6 +1,6 @@
 #!/bin/bash
 # Installs Tosslist on a Raspberry Pi running Raspberry Pi OS Lite.
-# Run it with:  sudo bash /boot/firmware/tosslist/install.sh
+# Run it with:  sudo bash ~/tosslist/install.sh   (after cloning from GitHub)
 set -e
 
 if [ "$(id -u)" -ne 0 ]; then
