@@ -273,16 +273,27 @@ def is_configured(cfg=None):
 
 # ---------- offline queue ----------
 
+@contextlib.contextmanager
+def _shared(name):
+    """A lock both Tosslist services respect (the settings page can now undo
+    scans, so it touches the queue and recent scans too)."""
+    with _lock:
+        os.makedirs(LOCK_DIR, exist_ok=True)
+        with open(os.path.join(LOCK_DIR, name + ".lock"), "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            yield
+
+
 def queue_add(item):
     item.setdefault("queued_at", time.time())
-    with _lock:
+    with _shared("queue"):
         q = read_json(QUEUE_PATH, [])
         q.append(item)
         write_json(QUEUE_PATH, q)
 
 
 def queue_take_all():
-    with _lock:
+    with _shared("queue"):
         q = read_json(QUEUE_PATH, [])
         if q:
             write_json(QUEUE_PATH, [])
@@ -293,8 +304,31 @@ def queue_size():
     return len(read_json(QUEUE_PATH, []))
 
 
+def queue_remove(item_id):
+    """Take one scan out of the queue. Returns it, or None if it isn't there."""
+    with _shared("queue"):
+        q = read_json(QUEUE_PATH, [])
+        keep = [i for i in q if i.get("id") != item_id]
+        if len(keep) == len(q):
+            return None
+        write_json(QUEUE_PATH, keep)
+        return next(i for i in q if i.get("id") == item_id)
+
+
+def update_recent(entry_id, changes):
+    with _shared("recent"):
+        recent = read_json(RECENT_PATH, [])
+        for e in recent:
+            if e.get("id") == entry_id:
+                e.update(changes)
+                write_json(RECENT_PATH, recent)
+                return e
+        return None
+
+
 def record_recent(entry, keep=20):
-    with _lock:
+    entry.setdefault("ts", time.time())
+    with _shared("recent"):
         recent = read_json(RECENT_PATH, [])
         recent.insert(0, entry)
         write_json(RECENT_PATH, recent[:keep])

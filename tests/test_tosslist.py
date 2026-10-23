@@ -72,6 +72,10 @@ class FakeSession:
                 assert "X-Request-Id" in kw["headers"]
                 task = dict(kw["json"], id=f"task{len(self.tasks) + 1}")
                 self.tasks.append(task); return Resp(200, task)
+            if method == "DELETE" and path.startswith("/tasks/"):
+                tid = path.split("/")[2]
+                self.tasks = [t for t in self.tasks if t.get("id") != tid]
+                return Resp(204)
             if method == "POST" and path.startswith("/tasks/") and path.endswith("/close"):
                 tid = path.split("/")[2]
                 for t in self.tasks:
@@ -1234,6 +1238,113 @@ def test_needs_attention_card_on_settings_page():
     c = unlocked_client()
     c.post("/save", data={"has_updates": "1", "auto_update": "1"})
     assert common.load_config()["send_alerts"] is False and common.load_config()["auto_update"] is True
+
+
+# ---------------- Undo (issue #8) ----------------
+
+def undo_setup():
+    s, scan, last = routing_setup("every", todoist=True)       # Todoist + Fred Meyer + Walmart
+    tf = lambda t: scanner.TodoistClient(t, s)
+    return s, scan, last, tf
+
+
+def recent():
+    return common.read_json(common.RECENT_PATH, [])
+
+
+def test_undo_reverses_the_last_scan_then_walks_back():
+    s, scan, last, tf = undo_setup()
+    scan("011110417005")                                        # milk: Todoist, FM cart, Walmart
+    scan("04252614")                                            # soda
+    assert len(s.tasks) == 2 and len(walmart.basket()["items"]) == 2
+    fb = FakeFeedback()
+    assert scanner.handle_scan("TOSSLIST-UNDO", fb, tf) == "card"
+    assert fb.calls == ["success"]
+    assert [t["content"] for t in s.tasks] == ["Kroger 2% Milk (1 gal)"]  # soda task deleted
+    assert [i["item_id"] for i in walmart.basket()["items"]] == ["10450114"]
+    note = recent()[0]
+    assert note["name"] == "Undo" and note["result"].startswith("Small Soda (12 oz): removed from Todoist")
+    assert "remove it from your Fred Meyer cart in the app" in note["result"]
+    assert recent()[1]["undone"] and recent()[1]["result"].endswith("· Undone")
+    scanner.handle_scan("TOSSLIST-UNDO", fb, tf)                 # again: the milk
+    assert s.tasks == [] and walmart.basket()["items"] == []
+    scanner.handle_scan("TOSSLIST-UNDO", fb, tf)                 # nothing left
+    assert fb.calls[-1] == "error" and recent()[0]["result"] == "Nothing to undo from the last 24 hours"
+
+
+def test_undo_quantity_and_duplicates():
+    s, scan, last, tf = undo_setup()
+    scan("011110417005"); scan("011110417005")                  # 2 on Walmart list, 1 Todoist task
+    assert walmart.basket()["items"][0]["qty"] == 2 and len(s.tasks) == 1
+    scanner.handle_scan("TOSSLIST-UNDO", FakeFeedback(), tf)
+    assert walmart.basket()["items"][0]["qty"] == 1 and len(s.tasks) == 1   # duplicate added no task
+    assert "removed from the Walmart list" in recent()[0]["result"]
+
+
+def test_undo_a_scan_still_waiting_for_internet():
+    s, scan, last, tf = undo_setup()
+    s.offline = True
+    assert scan("011110417005") == "queued"
+    s.offline = False
+    scanner.handle_scan("TOSSLIST-UNDO", FakeFeedback(), tf)
+    assert common.queue_size() == 0 and "taken out of the waiting scans" in recent()[0]["result"]
+    assert scanner.retry_queue_once(tf, lambda c: kroger.KrogerClient(c, s),
+                                    lambda c: walmart.WalmartClient(c, s)) == 0
+    assert s.tasks == [] and s.cart == [] and walmart.basket()["items"] == []
+
+
+def test_undo_after_a_retry_sent_it():
+    s, scan, last, tf = undo_setup()
+    s.offline = True; scan("011110417005"); s.offline = False
+    scanner.retry_queue_once(tf, lambda c: kroger.KrogerClient(c, s), lambda c: walmart.WalmartClient(c, s))
+    assert recent()[0]["undo"]["todoist_task_id"] and "waiting" not in recent()[0]["result"]
+    scanner.handle_scan("TOSSLIST-UNDO", FakeFeedback(), tf)
+    assert s.tasks == [] and walmart.basket()["items"] == []
+
+
+def test_undo_waits_if_todoist_unreachable_and_ignores_old_scans():
+    s, scan, last, tf = undo_setup()
+    common.save_config({"skip_duplicates": False})
+    scan("011110417005"); scan("011110417005")                  # 2 milks: 2 tasks, qty 2
+    assert len(s.tasks) == 2 and walmart.basket()["items"][0]["qty"] == 2
+    s.offline_hosts.add("todoist")
+    fb = FakeFeedback()
+    scanner.handle_scan("TOSSLIST-UNDO", fb, tf)
+    assert fb.calls == ["error"] and not recent()[1].get("undone")
+    assert walmart.basket()["items"][0]["qty"] == 1
+    s.offline_hosts.clear()
+    scanner.handle_scan("TOSSLIST-UNDO", fb, tf)                 # retry: only what's left
+    assert fb.calls[-1] == "success"
+    assert walmart.basket()["items"][0]["qty"] == 1              # not taken off a second time
+    assert recent()[0]["result"] == "Kroger 2% Milk (1 gal): removed from Todoist."
+    assert len(s.tasks) == 1
+    scanner.handle_scan("TOSSLIST-UNDO", fb, tf)                 # the first milk
+    assert s.tasks == [] and walmart.basket()["items"] == []
+    scan("04252614")
+    r = recent(); r[0]["ts"] -= 25 * 3600; common.write_json(common.RECENT_PATH, r)
+    scanner.handle_scan("TOSSLIST-UNDO", fb, tf)
+    assert "Nothing to undo" in recent()[0]["result"]
+
+
+def test_undo_button_and_card_need_no_pin():
+    s, scan, last, tf = undo_setup()
+    scan("04252614")
+    fresh_pin_state(); setup_portal.set_pin("1357")
+    c = setup_portal.app.test_client()                          # not unlocked
+    html = c.get("/").get_data(as_text=True)
+    assert ">Undo</button>" in html and 'href="/undo-card"' in html
+    orig = scanner.TodoistClient
+    scanner.TodoistClient = lambda t: orig(t, s)
+    try:
+        c.post("/undo", data={"id": recent()[0]["id"]})
+    finally:
+        scanner.TodoistClient = orig
+    assert "Undone: Small Soda" in c.get("/").get_data(as_text=True)
+    assert s.tasks == [] and walmart.basket()["items"] == []
+    page = c.get("/undo-card").get_data(as_text=True)
+    assert "<svg" in page and "Undo last scan" in page
+    r = c.get("/undo-card.svg")
+    assert r.mimetype == "image/svg+xml" and "tosslist-undo.svg" in r.headers["Content-Disposition"]
 
 
 if __name__ == "__main__":
