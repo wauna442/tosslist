@@ -87,8 +87,9 @@ What they do:
 1. Installs **git**, the tool that talks to GitHub.
 2. **Clones** (downloads) Tosslist from GitHub into a `tosslist` folder in your
    home folder on the Pi. This copy is also how you'll get updates later.
-3. Runs the installer. It downloads what Tosslist needs and finishes with
-   **"All done."** You can close the window afterwards.
+3. Runs the installer. It downloads what Tosslist needs, turns on
+   **read-only mode** (see "Power loss" below), and **restarts the Pi**. Your
+   SSH window closes when it restarts. That's expected. Give it two minutes.
 
 > **If the repo is private,** the clone command asks for a GitHub username and password.
 > GitHub doesn't accept your normal password there. Either make the repo public
@@ -280,24 +281,58 @@ reconnects on its own.
 
 ---
 
-## Power loss
+## Power loss and read-only mode
 
-Unplugging it is safe. Both programs start automatically on every power-up,
-settings are saved carefully so a sudden power cut can't half-write them, and
-anything scanned while offline is kept and sent once the internet is back.
+Unplugging it is safe. Tosslist runs in **read-only mode**: the Pi's system
+isn't written to the SD card at all (changes go to memory and vanish at the
+next power-up), so a power cut can't damage it. That's the most common way
+a Raspberry Pi stops working, and this prevents it.
+
+Tosslist's own data — settings, store connections, the Walmart list, and
+scans waiting for the internet — still survives. The SD card is unlocked
+for just the instant each one is saved. A WiFi network you pick in setup mode
+is saved permanently the same way.
+
+Both programs start automatically on every power-up, and anything scanned
+while offline is sent once the internet is back.
+
+**Changing things over SSH:** in read-only mode, anything you change by hand
+on the Pi (installing software, editing files) disappears at the next
+restart. Tosslist's install and update scripts handle this for you. To work
+on the Pi by hand, turn read-only mode off first:
+
+```
+sudo bash ~/tosslist/install.sh --no-readonly
+```
+
+The Pi restarts with read-only mode off and keeps it off. Turn it back on
+with `sudo bash ~/tosslist/install.sh --readonly`.
 
 ---
 
 ## Updating Tosslist
 
-When there's a new version on GitHub, SSH in (Step 4) and run:
+SSH in (Step 4) and run:
 
 ```
-cd ~/tosslist && git pull && sudo bash install.sh
+sudo bash ~/tosslist/update.sh
 ```
+
+This updates to the newest **release** (like `v26.11.0`). To get the newest
+reviewed change on `main` before it's released, add `--main`. To just see
+whether there's an update, add `--check`.
+
+If there's an update, the Pi turns read-only mode off, restarts, installs
+the update by itself, turns read-only mode back on, and restarts again.
+Your SSH window closes at the first restart. Allow about five minutes in
+total. If nothing is new, nothing restarts.
 
 Your settings, Todoist token, Fred Meyer connection, Walmart key and
-Walmart list are kept.
+Walmart list are kept. The settings page shows the result of the last
+update.
+
+**Updating from an older version** (before read-only mode existed), run
+this once instead: `cd ~/tosslist && git pull && sudo bash install.sh`
 
 ---
 
@@ -340,7 +375,9 @@ same patterns as the light.
 | `walmart.py` | The Walmart connection: key, product lookup, Walmart list, cart link |
 | `setup_portal.py` | The settings page and the WiFi setup mode |
 | `common.py` | Shared pieces: saving settings, the offline queue, the light |
-| `install.sh` | One-time installer |
+| `install.sh` | Installer; also switches read-only mode on or off |
+| `update.sh` | Updates from GitHub, handling read-only mode's restarts |
+| `scripts/` | Shared script helpers, and `resume.sh`, which finishes an install or update after a restart |
 | `systemd/` | Tells the Pi to start both programs on every power-up |
 | `tests/` | Checks that run on any computer: `python3 tests/test_tosslist.py` |
 

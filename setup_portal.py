@@ -10,6 +10,7 @@ connecting Fred Meyer, and seeing recent scans.
 """
 
 import logging
+import os
 import secrets
 import subprocess
 import threading
@@ -169,6 +170,7 @@ def connect_wifi(ssid, password):
     if code == 0:
         state["message"] = f"Connected to {ssid}."
         log.info("Joined WiFi '%s'", ssid)
+        persist_wifi_profile()
         if feedback:
             feedback.success() if common.is_configured() else feedback.setup_mode()
         return True
@@ -179,6 +181,48 @@ def connect_wifi(ssid, password):
                       "try again.")
     start_hotspot()
     return False
+
+
+def persist_wifi_profile():
+    """In read-only mode, NetworkManager saves the new WiFi network to RAM,
+    where it would vanish at the next power-up. Copy the saved network
+    onto the real disk (issue #7)."""
+    if not common.read_only_active():
+        return False
+    code, out = run(["nmcli", "-t", "-f", "GENERAL.CONNECTION", "device",
+                     "show", WIFI_IFACE], timeout=10)
+    name = split_terse(out.strip().splitlines()[0])[1] if code == 0 and out.strip() else ""
+    if not name:
+        return False
+    code, out = run(["nmcli", "-t", "-f", "NAME,FILENAME", "connection", "show"],
+                    timeout=10)
+    path = ""
+    for line in out.splitlines() if code == 0 else []:
+        parts = split_terse(line)
+        if len(parts) >= 2 and parts[0] == name:
+            path = parts[1]
+            break
+    if not path.startswith("/etc/NetworkManager/system-connections/"):
+        log.warning("Couldn't find where WiFi network '%s' is saved", name)
+        return False
+    dest = common.LOWER_ROOT + path
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        with common.writable():
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            tmp = dest + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, dest)
+    except OSError as e:
+        log.error("Couldn't save WiFi network '%s' permanently: %s", name, e)
+        return False
+    log.info("Saved WiFi network '%s' permanently", name)
+    return True
 
 
 def watch_network():
@@ -270,6 +314,7 @@ PAGE = """<!doctype html>
 <p class="sub">{% if hotspot %}Setup mode{% else %}Settings{% endif %}
  {% if configured %}· <span class="ok">ready to scan</span>{% endif %}</p>
 
+{% if data_warning %}<div class="card bad">{{ data_warning }}</div>{% endif %}
 {% if message %}<div class="card ok">{{ message }}</div>{% endif %}
 {% if error %}<div class="card bad">{{ error }}</div>{% endif %}
 
@@ -523,6 +568,7 @@ def index():
         kroger_store=cfg.get("kroger_location_name", ""),
         kroger_location_id=cfg.get("kroger_location_id", ""),
         stores=state["stores"], zip=state["zip"],
+        data_warning=common.DATA_WARNING,
         store_rows=[{"key": k, "label": common.STORE_LABELS[k],
                      "on": bool(cfg.get(f"send_to_{k}")),
                      "ready": (common.kroger_ready(cfg) if k == "kroger"

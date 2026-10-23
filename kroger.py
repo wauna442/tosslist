@@ -116,11 +116,12 @@ def _token_request(cfg, data, session):
 
 
 def _save_token(tok):
-    common.write_json(TOKEN_PATH, tok)
-    try:
-        os.chmod(TOKEN_PATH, 0o600)
-    except OSError:
-        pass
+    with common.writable():
+        common.write_json(TOKEN_PATH, tok)
+        try:
+            os.chmod(TOKEN_PATH, 0o600)
+        except OSError:
+            pass
 
 
 def exchange_code(cfg, code, verifier, session=None):
@@ -133,10 +134,11 @@ def exchange_code(cfg, code, verifier, session=None):
 
 
 def disconnect():
-    try:
-        os.remove(TOKEN_PATH)
-    except FileNotFoundError:
-        pass
+    with common.writable():
+        try:
+            os.remove(TOKEN_PATH)
+        except FileNotFoundError:
+            pass
 
 
 # ---------- everyday use ----------
@@ -161,8 +163,10 @@ class KrogerClient:
     def user_token(self, force_refresh=False):
         """Key for your cart. Renews itself; Kroger hands out a new renewal
         key each time, so this is done under a file lock."""
-        os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-        with open(TOKEN_PATH + ".lock", "w") as lock:
+        # The lock file lives in RAM (/run): a file held open for writing on
+        # the real disk would stop it from being locked again (issue #7).
+        os.makedirs(common.LOCK_DIR, exist_ok=True)
+        with open(os.path.join(common.LOCK_DIR, "kroger-token.lock"), "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             tok = common.read_json(TOKEN_PATH, None)
             if not tok:
