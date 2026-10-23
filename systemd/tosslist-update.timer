@@ -1,0 +1,9 @@
+[Unit]
+Description=Check for a new Tosslist release each night
+
+[Timer]
+OnCalendar=*-*-* 03:30
+RandomizedDelaySec=45min
+
+[Install]
+WantedBy=timers.target
