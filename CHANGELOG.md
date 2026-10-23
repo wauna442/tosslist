@@ -9,13 +9,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#releases).
 
 ## [Unreleased]
 
-### Added
-- Project governance: [CONSTITUTION.md](CONSTITUTION.md),
-  [GOVERNANCE.md](GOVERNANCE.md), [CONTRIBUTING.md](CONTRIBUTING.md),
-  [SECURITY.md](SECURITY.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
-  AI contributor guide, pull request and issue templates, and automatic
-  tests (CI) on every pull request. Adapted from AetherSDR.
-
 ## [v26.10.0] — 2026-10-23
 
 First release.
@@ -40,6 +33,10 @@ First release.
   in any combination.
 - **Install from GitHub.** The setup guide clones the repository on the
   Pi. Updating is one command.
+- **Project governance.** Constitution, governance, contributing and
+  security policies, pull request and issue templates, and automatic tests
+  on every pull request, adapted from AetherSDR. `main` is protected:
+  changes land only through reviewed pull requests with passing checks.
 
 [Unreleased]: https://github.com/wauna442/tosslist/compare/v26.10.0...HEAD
 [v26.10.0]: https://github.com/wauna442/tosslist/releases/tag/v26.10.0
