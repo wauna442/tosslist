@@ -20,6 +20,7 @@ from flask import Flask, redirect, render_template_string, request
 
 import common
 import kroger
+import walmart
 
 log = logging.getLogger("tosslist")
 
@@ -262,6 +263,21 @@ PAGE = """<!doctype html>
 {% if message %}<div class="card ok">{{ message }}</div>{% endif %}
 {% if error %}<div class="card bad">{{ error }}</div>{% endif %}
 
+{% if not hotspot and walmart_items %}
+<div class="card">
+ <h2>Walmart list · {{ walmart_count }} item{% if walmart_count != 1 %}s{% endif %}{% if walmart_total %} · about ${{ "%.2f"|format(walmart_total) }}{% endif %}</h2>
+ <table>{% for it in walmart_items %}<tr>
+  <td>{{ it.qty }}×</td><td>{{ it.name }}{% if it.price %}<br><span class="hint">${{ "%.2f"|format(it.price) }} each</span>{% endif %}</td>
+  <td style="width:1%"><form method="post" action="/walmart/remove"><input type="hidden" name="id" value="{{ it.id }}">
+   <button class="quiet" style="margin:0;padding:6px 10px;width:auto" aria-label="Remove {{ it.name }}">✕</button></form></td></tr>
+ {% endfor %}</table>
+ <a class="btn" href="/walmart/open" target="_blank" rel="noopener">Open in Walmart cart</a>
+ <p class="hint">Opens walmart.com with these items in your cart. Prices are
+ walmart.com prices and may differ in store.{% if walmart_opened %} Last opened {{ walmart_opened }}.{% endif %}</p>
+ <form method="post" action="/walmart/clear"><button class="quiet">{% if walmart_opened %}Done, clear the list{% else %}Clear the list{% endif %}</button></form>
+</div>
+{% endif %}
+
 <form method="post" action="/save">
  <div class="card">
   {% if hotspot %}
@@ -293,7 +309,10 @@ PAGE = """<!doctype html>
   <label class="check"><input type="checkbox" name="send_to_kroger" value="1"
    {% if send_to_kroger %}checked{% endif %}><div>Fred Meyer cart
    <span>{% if kroger_ready %}Ready · {{ kroger_store }}{% elif kroger_connected %}Pick your store below{% else %}Set up below{% endif %}</span></div></label>
-  <p class="hint">Turn on one or both. Each scan goes to everything that's on.</p>
+  <label class="check"><input type="checkbox" name="send_to_walmart" value="1"
+   {% if send_to_walmart %}checked{% endif %}><div>Walmart list
+   <span>{% if walmart_ready %}Ready · open it in your Walmart cart below{% else %}Set up below{% endif %}</span></div></label>
+  <p class="hint">Turn on any mix. Each scan goes to everything that's on.</p>
  </div>
  {% endif %}
 
@@ -332,6 +351,18 @@ PAGE = """<!doctype html>
    <p class="hint">Must exactly match the Redirect URI in your Kroger app.</p>
    <input name="kroger_redirect_uri" value="{{ kroger_redirect_uri }}" autocapitalize="none">
   </details>
+ </div>
+
+ <div class="card">
+  <h2>Walmart app details</h2>
+  <p class="hint">From the app you create at walmart.io. See the setup guide.</p>
+  <label for="walmart_consumer_id">Consumer ID</label>
+  <input id="walmart_consumer_id" name="walmart_consumer_id" value="{{ walmart_consumer_id }}"
+   autocomplete="off" autocapitalize="none">
+  <label for="walmart_key_version">Key version</label>
+  <input id="walmart_key_version" name="walmart_key_version" value="{{ walmart_key_version }}"
+   inputmode="numeric">
+  <p class="hint">Shown next to your key on walmart.io. Usually 1.</p>
  </div>
  {% endif %}
  <button type="submit">Save</button>
@@ -381,6 +412,29 @@ PAGE = """<!doctype html>
  {% endif %}
 </div>
 {% endif %}
+
+<div class="card">
+ <h2>Walmart key</h2>
+ {% if walmart_public_key %}
+  <p class="hint">Paste this whole block into walmart.io when it asks for your
+  public key. It's safe to share; the private half stays on this device.</p>
+  <textarea id="pubkey" readonly rows="9" style="width:100%;box-sizing:border-box;font:12px/1.35 ui-monospace,Menlo,monospace;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)">{{ walmart_public_key }}</textarea>
+  <button type="button" onclick="var t=document.getElementById('pubkey');t.select();try{navigator.clipboard.writeText(t.value);this.textContent='Copied'}catch(e){document.execCommand('copy');this.textContent='Copied'}">Copy public key</button>
+  {% if walmart_consumer_id %}
+  <form method="post" action="/walmart/check"><button class="quiet">Test Walmart connection</button></form>
+  {% endif %}
+  <details style="margin-top:12px"><summary>Make a new key</summary>
+   <p class="hint">Only if you need to start over. The old key stops working, so
+   you'd paste the new one into walmart.io again.</p>
+   <form method="post" action="/walmart/key"><input type="hidden" name="replace" value="1">
+    <button class="quiet">Replace key</button></form>
+  </details>
+ {% else %}
+  <p class="hint">Walmart needs a security key to accept requests. Tosslist
+  makes one for you.</p>
+  <form method="post" action="/walmart/key"><button>Create Walmart key</button></form>
+ {% endif %}
+</div>
 {% endif %}
 
 {% if recent %}
@@ -405,6 +459,7 @@ def index():
     cfg = common.load_config()
     msg, err = state["message"], state["error"]
     state["message"] = state["error"] = ""
+    wb = walmart.basket()
     return render_template_string(
         PAGE, hotspot=state["hotspot"], networks=state["networks"],
         message=msg, error=err, configured=common.is_configured(cfg),
@@ -424,6 +479,15 @@ def index():
         kroger_store=cfg.get("kroger_location_name", ""),
         kroger_location_id=cfg.get("kroger_location_id", ""),
         stores=state["stores"], zip=state["zip"],
+        send_to_walmart=cfg.get("send_to_walmart", False),
+        walmart_ready=common.walmart_ready(cfg),
+        walmart_consumer_id=cfg.get("walmart_consumer_id", ""),
+        walmart_key_version=cfg.get("walmart_key_version", "1"),
+        walmart_public_key=walmart.public_key(),
+        walmart_items=wb["items"],
+        walmart_count=sum(it["qty"] for it in wb["items"]),
+        walmart_total=walmart.basket_total(wb["items"]),
+        walmart_opened=wb.get("opened_at"),
         recent=common.read_json(common.RECENT_PATH, [])[:10],
         queued=common.queue_size())
 
@@ -446,6 +510,7 @@ def save():
     if f.get("has_dest"):
         updates["send_to_todoist"] = f.get("send_to_todoist") == "1"
         updates["send_to_kroger"] = f.get("send_to_kroger") == "1"
+        updates["send_to_walmart"] = f.get("send_to_walmart") == "1"
     old = common.load_config()
     cid = f.get("kroger_client_id")
     if cid is not None and cid.strip() != old.get("kroger_client_id", ""):
@@ -459,6 +524,11 @@ def save():
     uri = f.get("kroger_redirect_uri", "").strip()
     if uri:
         updates["kroger_redirect_uri"] = uri
+    if f.get("walmart_consumer_id") is not None:
+        updates["walmart_consumer_id"] = f["walmart_consumer_id"].strip()
+    kv = f.get("walmart_key_version", "").strip()
+    if kv:
+        updates["walmart_key_version"] = kv
     cfg = common.save_config(updates)
 
     ssid = (f.get("ssid_manual", "").strip() or f.get("ssid", "").strip())
@@ -476,8 +546,11 @@ def save():
         if cfg.get("send_to_kroger") and not common.kroger_ready(cfg):
             notes.append("Fred Meyer is on but isn't finished: connect your "
                          "account and pick a store below.")
-        if not cfg.get("send_to_todoist") and not cfg.get("send_to_kroger"):
-            notes.append("Both destinations are off, so scans won't go anywhere.")
+        if cfg.get("send_to_walmart") and not common.walmart_ready(cfg):
+            notes.append("Walmart is on but isn't finished: add the Consumer ID "
+                         "and create the Walmart key.")
+        if not any(cfg.get(k) for k in ("send_to_todoist", "send_to_kroger", "send_to_walmart")):
+            notes.append("Every destination is off, so scans won't go anywhere.")
         state["message"] = "Saved. " + " ".join(notes) if notes else "Saved."
         if feedback:
             feedback.ready() if common.is_configured(cfg) else feedback.setup_mode()
@@ -588,6 +661,59 @@ phone to your home WiFi and visit <b>http://tosslist.local</b> anytime
 to change settings.</p>
 <p>If it couldn't connect, the <b>Tosslist Setup</b> network comes back
 in about a minute so you can try again.</p></body></html>"""
+
+
+# ---------- Walmart ----------
+
+@app.route("/walmart/key", methods=["POST"])
+def walmart_key():
+    if walmart.has_key() and request.form.get("replace") != "1":
+        return redirect("/")
+    walmart.create_key()
+    state["message"] = ("Walmart key created. Copy the public key below and "
+                        "paste it into your app on walmart.io.")
+    return redirect("/")
+
+
+@app.route("/walmart/check", methods=["POST"])
+def walmart_check():
+    cfg = common.load_config()
+    if not common.walmart_ready(cfg):
+        state["error"] = "Add the Consumer ID and create the key first."
+        return redirect("/")
+    try:
+        walmart.WalmartClient(cfg).check()
+        state["message"] = "Walmart accepted the connection ✓"
+    except walmart.WalmartAuthError:
+        state["error"] = ("Walmart didn't accept it. Check the Consumer ID and key "
+                          "version, and that this public key is the one on walmart.io. "
+                          "New keys can take a few minutes to start working.")
+    except requests.RequestException:
+        state["error"] = "Couldn't reach Walmart. Check the internet and try again."
+    return redirect("/")
+
+
+@app.route("/walmart/open")
+def walmart_open():
+    link = walmart.cart_link(walmart.basket()["items"])
+    if not link:
+        state["error"] = "The Walmart list is empty."
+        return redirect("/")
+    walmart.mark_opened()
+    return redirect(link)
+
+
+@app.route("/walmart/remove", methods=["POST"])
+def walmart_remove():
+    walmart.basket_remove(request.form.get("id", ""))
+    return redirect("/")
+
+
+@app.route("/walmart/clear", methods=["POST"])
+def walmart_clear():
+    walmart.basket_clear()
+    state["message"] = "Walmart list cleared."
+    return redirect("/")
 
 
 # Phones check special web addresses to detect a sign-in page. While in

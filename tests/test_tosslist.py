@@ -1,14 +1,14 @@
 """Tests that run on any computer, using fake versions of Todoist,
-Fred Meyer (Kroger), the product databases and the WiFi controls.
+Fred Meyer (Kroger), Walmart, the product databases and the WiFi controls.
 
 Run with:  python3 tests/test_tosslist.py
 """
-import json, os, sys, tempfile, time
+import os, sys, tempfile, time
 os.environ["TOSSLIST_DATA_DIR"] = tempfile.mkdtemp()
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 import requests
-import common, scanner, setup_portal, kroger
+import common, scanner, setup_portal, kroger, walmart
 
 
 class FakeFeedback:
@@ -69,7 +69,32 @@ class FakeSession:
                 self.tasks.append(kw["json"]); return Resp(200, kw["json"])
         if "api.kroger.com" in url:
             return self.kroger(method, url.split("/v1")[1], kw)
+        if "developer.api.walmart.com" in url:
+            return self.walmart(method, url.split("/affil/product/v2")[1], kw)
         raise AssertionError(url)
+
+    def walmart(self, method, path, kw):
+        h = kw["headers"]
+        # verify the signature exactly as Walmart would, using the public key
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+        import base64
+        pub = serialization.load_pem_public_key(walmart.public_key().encode())
+        msg = f"{h['WM_CONSUMER.ID']}\n{h['WM_CONSUMER.INTIMESTAMP']}\n{h['WM_SEC.KEY_VERSION']}\n".encode()
+        try:
+            pub.verify(base64.b64decode(h["WM_SEC.AUTH_SIGNATURE"]), msg, padding.PKCS1v15(), hashes.SHA256())
+        except Exception:
+            return Resp(401, {"error": "bad signature"})
+        if h["WM_CONSUMER.ID"] != "wm-consumer" or self.bad_token:
+            return Resp(401, {"error": "unknown consumer"})
+        assert abs(int(h["WM_CONSUMER.INTIMESTAMP"]) - time.time() * 1000) < 60000
+        assert method == "GET" and path == "/items"
+        upc = kw["params"]["upc"]
+        catalog = {"011110417005": {"itemId": 10450114, "name": "Great Value 2% Milk, 1 gal", "salePrice": 3.12, "upc": upc},
+                   "042100005264": {"itemId": 55512, "name": "Small Soda 12 oz", "salePrice": 0.98}}
+        if upc in catalog:
+            return Resp(200, {"items": [catalog[upc]]})
+        return Resp(400, {"errors": [{"code": 4002, "message": "Invalid UPC"}]})
 
     def kroger(self, method, path, kw):
         h = kw.get("headers", {})
@@ -115,7 +140,7 @@ class FakeSession:
 
 def reset():
     for p in (common.CONFIG_PATH, common.QUEUE_PATH, common.CACHE_PATH, common.RECENT_PATH,
-              common.KROGER_TOKEN_PATH):
+              common.KROGER_TOKEN_PATH, common.WALMART_BASKET_PATH):
         if os.path.exists(p): os.remove(p)
 
 
@@ -426,6 +451,126 @@ def test_portal_kroger_flow():
         setup_portal.state["hotspot"] = False
     finally:
         kroger.requests.Session = orig_session
+
+
+# ---------------- Walmart ----------------
+
+_KEY_MADE = []
+
+def walmart_setup(session, todoist=False):
+    reset()
+    if not _KEY_MADE:                       # making RSA keys is slow; once is enough
+        walmart.create_key(); _KEY_MADE.append(1)
+    common.save_config({"send_to_todoist": todoist, "todoist_token": "t" if todoist else "",
+                        "send_to_walmart": True, "walmart_consumer_id": "wm-consumer",
+                        "walmart_key_version": "1"})
+    return lambda cfg: walmart.WalmartClient(cfg, session)
+
+
+def test_walmart_key_and_signature():
+    walmart_setup(FakeSession())
+    assert oct(os.stat(common.WALMART_KEY_PATH).st_mode)[-3:] == "600"
+    pub = walmart.public_key()
+    assert pub.startswith("-----BEGIN PUBLIC KEY-----") and "PRIVATE" not in pub
+    h = walmart.signed_headers("wm-consumer", "1")
+    assert set(h) >= {"WM_CONSUMER.ID", "WM_CONSUMER.INTIMESTAMP", "WM_SEC.KEY_VERSION", "WM_SEC.AUTH_SIGNATURE"}
+    assert walmart.upc_candidates("0011110417005") == ["011110417005", "0011110417005"]
+    assert walmart.upc_candidates("04252614") == ["042100005264"]
+
+
+def test_walmart_scans_build_basket():
+    s = FakeSession(); wf = walmart_setup(s); fb = FakeFeedback()
+    assert scanner.handle_scan("011110417005", fb, None, None, wf) == "done"
+    assert scanner.handle_scan("011110417005", fb, None, None, wf) == "done"
+    assert scanner.handle_scan("04252614", fb, None, None, wf) == "done"
+    b = walmart.basket()["items"]
+    assert [(i["item_id"], i["qty"]) for i in b] == [("10450114", 2), ("55512", 1)]
+    assert common.read_json(common.RECENT_PATH, [])[0]["result"] == "Walmart: on Walmart list ($0.98)"
+    assert abs(walmart.basket_total(b) - 7.22) < 0.001
+    link = walmart.cart_link(b)
+    assert link == "https://affil.walmart.com/cart/addToCart?items=10450114|2,55512|1"
+    # not carried
+    scanner.handle_scan("9999", fb, None, None, wf)
+    assert fb.calls == ["success", "success", "success", "error"]
+    assert common.read_json(common.RECENT_PATH, [])[0]["result"] == "Walmart: not found at Walmart"
+
+
+def test_walmart_bad_setup_and_offline():
+    s = FakeSession(); wf = walmart_setup(s); fb = FakeFeedback()
+    common.save_config({"walmart_consumer_id": "typo"})
+    scanner.handle_scan("011110417005", fb, None, None, wf)
+    assert fb.calls == ["error"] and common.queue_size() == 0
+    assert "sign-in problem" in common.read_json(common.RECENT_PATH, [])[0]["result"]
+    common.save_config({"walmart_consumer_id": "wm-consumer"})
+    s.offline = True
+    assert scanner.handle_scan("011110417005", fb, None, None, wf) == "queued"
+    s.offline = False
+    assert scanner.retry_queue_once(None, None, wf) == 1
+    assert walmart.basket()["items"][0]["qty"] == 1
+
+
+def test_all_three_destinations():
+    s = FakeSession(); wf = walmart_setup(s, todoist=True)
+    kf_cfg = {"send_to_kroger": True, "kroger_client_id": "cid", "kroger_client_secret": "sec",
+              "kroger_location_id": "70100123"}
+    common.save_config(kf_cfg)
+    common.write_json(common.KROGER_TOKEN_PATH, {"access_token": "user1", "refresh_token": "r1",
+                                                 "expires_at": time.time() + 1800})
+    kf = lambda cfg: kroger.KrogerClient(cfg, s)
+    tf = lambda t: scanner.TodoistClient(t, s)
+    assert common.destinations() == ["todoist", "kroger", "walmart"]
+    scanner.handle_scan("04252614", FakeFeedback(), tf, kf, wf)
+    r = common.read_json(common.RECENT_PATH, [])[0]
+    assert r["result"] == "Todoist: added · Fred Meyer: added ($1.25) · Walmart: on Walmart list ($0.98)"
+    assert s.tasks[0]["content"] == "Small Soda (12 oz)" and len(s.cart) == 1
+    assert walmart.basket()["items"][0]["item_id"] == "55512"
+
+
+def test_portal_walmart():
+    s = FakeSession()
+    orig = walmart.requests.Session
+    walmart.requests.Session = lambda: s
+    try:
+        reset()
+        common.save_config({"todoist_token": "t"})
+        setup_portal.state.update(hotspot=False, stores=[], zip="", oauth={})
+        c = setup_portal.app.test_client()
+        if os.path.exists(common.WALMART_KEY_PATH): os.remove(common.WALMART_KEY_PATH)
+        _KEY_MADE.clear()
+        html = c.get("/").get_data(as_text=True)
+        assert "Create Walmart key" in html and "Walmart list ·" not in html
+        c.post("/walmart/key")
+        _KEY_MADE.append(1)
+        html = c.get("/").get_data(as_text=True)
+        assert "Walmart key created" in html and "BEGIN PUBLIC KEY" in html and "PRIVATE" not in html
+        first = walmart.public_key()
+        c.post("/walmart/key"); assert walmart.public_key() == first          # no accidental replace
+        c.post("/save", data={"has_dest": "1", "send_to_todoist": "1", "send_to_walmart": "1",
+                              "walmart_consumer_id": "wm-consumer", "walmart_key_version": "1"})
+        cfg = common.load_config()
+        assert cfg["send_to_walmart"] and common.destinations(cfg) == ["todoist", "walmart"]
+        c.post("/walmart/check"); assert "accepted the connection" in c.get("/").get_data(as_text=True)
+        c.post("/save", data={"has_dest": "1", "send_to_walmart": "1", "walmart_consumer_id": "typo"})
+        c.get("/")
+        c.post("/walmart/check"); assert "accept it. Check the Consumer ID" in c.get("/").get_data(as_text=True)
+        # list card
+        walmart.basket_add({"item_id": "10450114", "name": "Great Value 2% Milk", "price": 3.12}, "011110417005")
+        walmart.basket_add({"item_id": "55512", "name": "Small Soda", "price": 0.98}, "04252614")
+        html = c.get("/").get_data(as_text=True)
+        assert "Walmart list · 2 items · about $4.10" in html and "Open in Walmart cart" in html
+        r = c.get("/walmart/open")
+        from urllib.parse import unquote
+        assert r.status_code == 302 and unquote(r.location) == "https://affil.walmart.com/cart/addToCart?items=10450114|1,55512|1"
+        assert "Done, clear the list" in c.get("/").get_data(as_text=True)
+        rid = walmart.basket()["items"][1]["id"]
+        c.post("/walmart/remove", data={"id": rid}); assert len(walmart.basket()["items"]) == 1
+        c.post("/walmart/clear"); assert walmart.basket()["items"] == []
+        r = c.get("/walmart/open"); assert r.location == "/"
+        assert "list is empty" in c.get("/").get_data(as_text=True)
+        # replace key
+        c.post("/walmart/key", data={"replace": "1"}); assert walmart.public_key() != first
+    finally:
+        walmart.requests.Session = orig
 
 
 if __name__ == "__main__":

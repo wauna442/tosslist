@@ -14,7 +14,7 @@ APP=/opt/tosslist
 echo "==> Installing software the scanner needs (this takes a few minutes)..."
 apt-get update
 apt-get install -y python3-evdev python3-flask python3-requests \
-  python3-gpiozero network-manager dnsmasq-base avahi-daemon
+  python3-gpiozero python3-cryptography network-manager dnsmasq-base avahi-daemon
 
 echo "==> Copying the program to $APP"
 mkdir -p "$APP" /var/lib/tosslist

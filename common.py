@@ -6,6 +6,8 @@ Everything the device remembers lives in /var/lib/tosslist:
   cache.json   - barcode -> product name, so repeat items skip the lookup
   recent.json  - last few scans, shown on the settings page
   kroger_token.json - the Fred Meyer sign-in key (never your password)
+  walmart_key.pem   - the key that signs Walmart requests (made on the device)
+  walmart_basket.json - items waiting to be opened in your Walmart cart
 """
 
 import json
@@ -20,11 +22,14 @@ QUEUE_PATH = os.path.join(DATA_DIR, "queue.json")
 CACHE_PATH = os.path.join(DATA_DIR, "cache.json")
 RECENT_PATH = os.path.join(DATA_DIR, "recent.json")
 KROGER_TOKEN_PATH = os.path.join(DATA_DIR, "kroger_token.json")
+WALMART_KEY_PATH = os.path.join(DATA_DIR, "walmart_key.pem")
+WALMART_BASKET_PATH = os.path.join(DATA_DIR, "walmart_basket.json")
 
 DEFAULT_CONFIG = {
     # where each scan goes: either or both
     "send_to_todoist": True,
     "send_to_kroger": False,
+    "send_to_walmart": False,
     "todoist_token": "",
     "project_name": "Grocery List",
     "skip_duplicates": True,   # don't add an item that's already on the list
@@ -36,6 +41,9 @@ DEFAULT_CONFIG = {
     "kroger_location_id": "",
     "kroger_location_name": "",
     "kroger_modality": "PICKUP",   # or DELIVERY
+    # Walmart (app you create at walmart.io)
+    "walmart_consumer_id": "",
+    "walmart_key_version": "1",
 }
 
 log = logging.getLogger("tosslist")
@@ -98,14 +106,21 @@ def kroger_ready(cfg):
     return kroger_connected(cfg) and bool(cfg.get("kroger_location_id"))
 
 
+def walmart_ready(cfg):
+    return bool(cfg.get("walmart_consumer_id")) and os.path.exists(WALMART_KEY_PATH)
+
+
 def destinations(cfg=None):
-    """Where a scan made right now should go: "todoist", "kroger", or both."""
+    """Where a scan made right now should go: any of "todoist", "kroger",
+    "walmart"."""
     cfg = cfg or load_config()
     out = []
     if cfg.get("send_to_todoist") and todoist_ready(cfg):
         out.append("todoist")
     if cfg.get("send_to_kroger") and kroger_ready(cfg):
         out.append("kroger")
+    if cfg.get("send_to_walmart") and walmart_ready(cfg):
+        out.append("walmart")
     return out
 
 

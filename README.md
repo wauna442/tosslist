@@ -2,7 +2,8 @@
 
 Scan an item as it goes in the trash. A few seconds later it shows up on a
 shared Todoist list that you and your partner both see, in your Fred Meyer
-cart, or both. You choose on the settings page.
+cart, on a Walmart list you open in your Walmart cart, or any mix of those.
+You choose on the settings page.
 
 Plan on about 45 minutes the first time. You need: the Raspberry Pi, its power
 supply, the microSD card, the OTG adapter, the barcode scanner, and a computer
@@ -159,12 +160,52 @@ If the portal won't accept that Redirect URI, use
 
 ---
 
+## Optional — Walmart list (15 min)
+
+Walmart's public API can look up products and prices but can't put items
+in your cart for you. So Tosslist keeps a **Walmart list** on the device. When
+you're ready to shop, tap **Open in Walmart cart** on tosslist.local and
+walmart.com opens with everything in your cart. Check out there as usual.
+
+Tosslist never needs your Walmart password.
+
+### A. Create a Walmart developer app
+
+1. Go to **walmart.io** and sign in with your normal Walmart.com account.
+2. Create a new application. Use any name, like *Tosslist*. Walmart may review
+   the application before it works.
+3. Keep that page open. It will ask for a **public key** in a moment.
+
+### B. Make the key on tosslist.local
+
+1. Open **http://tosslist.local**, scroll to **Walmart key**, and tap
+   **Create Walmart key**.
+2. Tap **Copy public key** and paste the whole block (including the
+   `BEGIN` and `END` lines) into walmart.io where it asks for your public key.
+3. walmart.io then shows a **Consumer ID** and a **key version** (usually 1).
+   Enter both under **Walmart app details** and tap **Save**.
+4. Tap **Test Walmart connection**. A brand-new key can take a few minutes to
+   start working, so try again shortly if it says no at first.
+5. Under **Where scans go**, check **Walmart list** and tap **Save**.
+
+### Good to know
+
+- **Scanning the same thing twice** makes the quantity 2 on the Walmart list.
+- **Remove an item** with the ✕ next to it, before you open the cart.
+- **After you check out**, tap **Done, clear the list** so the next order
+  starts fresh. Tosslist can't tell when you've ordered.
+- **Prices** are walmart.com prices, which can differ from your local store.
+- The Walmart list lives on the device, so open it while you're on your home
+  WiFi.
+
+---
+
 ## What the green light means
 
 | Light | Meaning |
 |---|---|
 | Solid on | Ready to scan |
-| 2 quick blinks | Added (to Todoist, your cart, or both) |
+| 2 quick blinks | Added (to Todoist, your Fred Meyer cart, and/or the Walmart list) |
 | 1 long blink | No internet right now. Saved, and it sends automatically later |
 | 5 fast blinks | Problem: open http://tosslist.local to see what happened |
 | Slow pulse | Setup mode (see below), or nowhere to send scans yet |
@@ -206,7 +247,8 @@ When there's a new version on GitHub, SSH in (Step 5) and run:
 cd ~/tosslist && git pull && sudo bash install.sh
 ```
 
-Your settings, Todoist token and Fred Meyer connection are kept.
+Your settings, Todoist token, Fred Meyer connection, Walmart key and
+Walmart list are kept.
 
 ---
 
@@ -246,6 +288,7 @@ same patterns as the light.
 |---|---|
 | `scanner.py` | Reads the scanner, looks up the product, sends it where you chose |
 | `kroger.py` | The Fred Meyer connection: sign-in, store search, prices, cart |
+| `walmart.py` | The Walmart connection: key, product lookup, Walmart list, cart link |
 | `setup_portal.py` | The settings page and the WiFi setup mode |
 | `common.py` | Shared pieces: saving settings, the offline queue, the light |
 | `install.sh` | One-time installer |
@@ -253,4 +296,5 @@ same patterns as the light.
 | `tests/` | Checks that run on any computer: `python3 tests/test_tosslist.py` |
 
 Product names come from **Open Food Facts** (open database, ODbL license) and
-**UPCitemdb**'s free tier. Fred Meyer data comes from the **Kroger Public API**.
+**UPCitemdb**'s free tier. Fred Meyer data comes from the **Kroger Public API**, and Walmart data from the
+**Walmart Affiliate API**.
