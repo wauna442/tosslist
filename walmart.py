@@ -182,6 +182,19 @@ def basket_remove(entry_id):
     common.write_json(BASKET_PATH, b)
 
 
+def basket_decrement(item_id):
+    """Take one of this item off the list. Returns False if it wasn't there."""
+    b = basket()
+    for it in b["items"]:
+        if it["item_id"] == item_id:
+            it["qty"] -= 1
+            if it["qty"] <= 0:
+                b["items"].remove(it)
+            common.write_json(BASKET_PATH, b)
+            return True
+    return False
+
+
 def basket_clear():
     common.write_json(BASKET_PATH, {"items": [], "opened_at": None})
 
