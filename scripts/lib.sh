@@ -31,6 +31,15 @@ run() {
   fi
 }
 
+# put_file "content" /path — write a system file (recorded instead in tests).
+put_file() {
+  if [ -n "${TOSSLIST_DRY_RUN:-}" ]; then
+    echo "write $2" >> "$TOSSLIST_DRY_RUN"
+  else
+    printf '%s\n' "$1" > "$2"
+  fi
+}
+
 require_root() {
   if [ "$(id -u)" -ne 0 ] && [ -z "${TOSSLIST_DRY_RUN:-}" ]; then
     echo "Please run with sudo:  sudo bash $0 $*"

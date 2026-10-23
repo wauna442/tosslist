@@ -928,7 +928,9 @@ def test_real_installer_turns_read_only_on_at_the_end():
     assert r.returncode == 0, r.stderr
     log = w.logged()
     assert log[0] == "apt-get update" and "overlayroot" in log[1]
-    assert "systemctl enable tosslist.service tosslist-setup.service tosslist-resume.service" in log
+    assert ("systemctl enable tosslist.service tosslist-setup.service tosslist-resume.service "
+            "tosslist-update.timer") in log
+    assert "write /etc/systemd/system/tosslist-update.timer" in log
     assert log[-2:] == ["raspi-config nonint enable_overlayfs", "systemctl reboot"]
     assert w.status()["result"] == "ok"
     # --no-readonly: remembered, and no restart
@@ -944,6 +946,60 @@ def test_real_installer_turns_read_only_on_at_the_end():
                        env=env, capture_output=True, text=True)
     assert w.logged() == ["raspi-config nonint disable_overlayfs", "systemctl reboot"]
     assert open(os.path.join(w.fw, "tosslist-resume")).read().endswith("install.sh\n--readonly\n")
+
+
+# ---------------- Nightly updates (issue #12) ----------------
+
+def test_nightly_respects_the_setting():
+    w = ScriptWorld(read_only=True)
+    os.makedirs(w.data, exist_ok=True)
+    json.dump({"auto_update": False}, open(os.path.join(w.data, "config.json"), "w"))
+    r = w.run(os.path.join(w.repo, "update.sh"), "--nightly")
+    assert "Automatic updates are off" in r.stdout and w.logged() == [] and w.version() == "1"
+    json.dump({"auto_update": True}, open(os.path.join(w.data, "config.json"), "w"))
+    r = w.run(os.path.join(w.repo, "update.sh"), "--nightly")
+    assert w.logged() == ["raspi-config nonint disable_overlayfs", "systemctl reboot"]
+    assert open(os.path.join(w.fw, "tosslist-resume")).read().endswith("--release\n")
+
+
+def test_nightly_default_is_on_and_quiet_when_current():
+    w = ScriptWorld(read_only=True)
+    subprocess.run(["git", "-C", w.repo, "checkout", "-q", "--detach", "v26.2.0"], check=True)
+    r = w.run(os.path.join(w.repo, "update.sh"), "--nightly")     # no config file yet
+    assert "Up to date" in r.stdout and w.logged() == []
+    assert w.status()["result"] == "current" and w.status()["version"] == "v26.2.0"
+
+
+def test_update_timer_and_service_files():
+    svc = open(os.path.join(REPO_ROOT, "systemd", "tosslist-update.service")).read()
+    timer = open(os.path.join(REPO_ROOT, "systemd", "tosslist-update.timer")).read()
+    assert "ExecStart=/bin/bash @REPO@/update.sh --nightly" in svc
+    assert "OnCalendar=*-*-* 03:30" in timer and "RandomizedDelaySec=45min" in timer
+
+
+def test_portal_updates_card():
+    reset()
+    common.save_config({"todoist_token": "t"})
+    setup_portal.state.update(hotspot=False, stores=[], zip="", oauth={})
+    common.write_json(common.UPDATE_STATUS_PATH, {"time": "2026-10-24 03:41", "result": "failed",
+                                                  "message": "No internet.", "version": "v26.10.0"})
+    c = setup_portal.app.test_client()
+    html = c.get("/").get_data(as_text=True)
+    assert "Install new releases each night" in html and "No internet." in html
+    assert 'name="auto_update" value="1"\n   checked' in html
+    c.post("/save", data={"has_updates": "1"})
+    assert common.load_config()["auto_update"] is False
+    started = []
+    orig = setup_portal.start_update
+    setup_portal.start_update = lambda: started.append(1) or True
+    try:
+        c.post("/update/now")
+        assert started and "Checking for updates" in c.get("/").get_data(as_text=True)
+        setup_portal.start_update = lambda: False
+        c.post("/update/now")
+        assert "find Tosslist" in c.get("/").get_data(as_text=True)
+    finally:
+        setup_portal.start_update = orig
 
 
 if __name__ == "__main__":

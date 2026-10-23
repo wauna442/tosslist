@@ -1,0 +1,10 @@
+[Unit]
+Description=Tosslist nightly update check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# @REPO@ is replaced with the repository's location by install.sh
+ExecStart=/bin/bash @REPO@/update.sh --nightly
+TimeoutStartSec=30min

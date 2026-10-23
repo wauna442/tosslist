@@ -4,6 +4,8 @@
 #   sudo bash ~/tosslist/update.sh            update to the newest release (e.g. v26.11.0)
 #   sudo bash ~/tosslist/update.sh --main     update to the newest reviewed change on main
 #   sudo bash ~/tosslist/update.sh --check    only say whether an update is available
+#   update.sh --nightly    what the nightly timer runs (issue #12): newest
+#                          release, only if automatic updates are on
 #
 # Read-only mode (issue #7): if it's on, the Pi turns it off, restarts,
 # installs the update by itself, turns read-only back on and restarts again.
@@ -17,8 +19,10 @@ source "$REPO/scripts/lib.sh"
 CHANNEL=release
 RESUMED=""
 CHECK_ONLY=""
+NIGHTLY=""
 for arg in "$@"; do
   case "$arg" in
+    --nightly) NIGHTLY=1; CHANNEL=release ;;
     --main) CHANNEL=main ;;
     --release) CHANNEL=release ;;
     --check) CHECK_ONLY=1 ;;
@@ -37,6 +41,20 @@ on_error() {
   if [ -n "$RESUMED" ] && readonly_wanted; then readonly_on_and_restart; fi
 }
 trap on_error ERR
+
+# Automatic updates can be turned off on the settings page.
+if [ -n "$NIGHTLY" ] && ! python3 - "$(data_dir)/config.json" <<'PY'
+import json, sys
+try:
+    on = json.load(open(sys.argv[1])).get("auto_update", True)
+except (OSError, ValueError):
+    on = True
+sys.exit(0 if on else 1)
+PY
+then
+  echo "Automatic updates are off."
+  exit 0
+fi
 
 # Downloading what's new only touches the repository's history, which is
 # fine even in read-only mode (it lands in RAM and is fetched again later).
