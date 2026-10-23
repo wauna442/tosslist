@@ -129,6 +129,8 @@ DEFAULT_CONFIG = {
     "kroger_low_counts": True,        # Fred Meyer "low stock" counts as in stock
     # Updates (issue #12)
     "auto_update": True,              # install new releases each night
+    # Alerts (issue #10)
+    "send_alerts": True,              # add a p1 Todoist task when Tosslist needs a person
 }
 
 log = logging.getLogger("tosslist")
@@ -272,6 +274,7 @@ def is_configured(cfg=None):
 # ---------- offline queue ----------
 
 def queue_add(item):
+    item.setdefault("queued_at", time.time())
     with _lock:
         q = read_json(QUEUE_PATH, [])
         q.append(item)
