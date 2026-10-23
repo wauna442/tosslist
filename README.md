@@ -312,7 +312,14 @@ with `sudo bash ~/tosslist/install.sh --readonly`.
 
 ## Updating Tosslist
 
-SSH in (Step 4) and run:
+**Automatically:** each night around 3:30–4:15 AM, Tosslist checks GitHub
+for a new **release** and installs it by itself (with the two restarts
+described below). It never installs unreleased changes. Turn this off under
+**Automatic updates** on the settings page. The **Updates** section there
+shows the version, whether read-only protection is on, and the result of the
+last check, and has an **Update now** button.
+
+**By hand:** SSH in (Step 4) and run:
 
 ```
 sudo bash ~/tosslist/update.sh

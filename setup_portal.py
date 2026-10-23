@@ -443,6 +443,14 @@ PAGE = """<!doctype html>
  </div>
 
  <div class="card">
+  <h2>Automatic updates</h2>
+  <input type="hidden" name="has_updates" value="1">
+  <label class="check" style="margin-top:0"><input type="checkbox" name="auto_update" value="1"
+   {% if auto_update %}checked{% endif %}><div>Install new releases each night
+   <span>Checks GitHub around 3:30–4:15 AM. Only reviewed, released versions are installed.</span></div></label>
+ </div>
+
+ <div class="card">
   <h2>Walmart app details</h2>
   <p class="hint">From the app you create at walmart.io. See the setup guide.</p>
   <label for="walmart_consumer_id">Consumer ID</label>
@@ -524,6 +532,22 @@ PAGE = """<!doctype html>
   <form method="post" action="/walmart/key"><button>Create Walmart key</button></form>
  {% endif %}
 </div>
+
+<div class="card">
+ <h2>Updates</h2>
+ <p>Version <b>{{ version }}</b><br>
+ <span class="hint">Read-only protection: {% if read_only %}<span class="ok">on</span>{% else %}off{% endif %}</span></p>
+ {% if update_status %}
+ <p class="hint">Last update: {{ update_status.time }} —
+  {% if update_status.result == "failed" %}<span class="bad">{{ update_status.message }}</span>{% else %}{{ update_status.message }}{% endif %}
+  {% if update_status.version %}({{ update_status.version }}){% endif %}</p>
+ {% endif %}
+ <form method="post" action="/update/now">
+  <button class="quiet">Update now</button></form>
+ <p class="hint">Installs the newest release if there is one. The Pi restarts
+ twice and is back in about five minutes; nothing restarts if it's already
+ up to date.</p>
+</div>
 {% endif %}
 
 {% if recent %}
@@ -569,6 +593,10 @@ def index():
         kroger_location_id=cfg.get("kroger_location_id", ""),
         stores=state["stores"], zip=state["zip"],
         data_warning=common.DATA_WARNING,
+        version=common.app_file("VERSION", "unknown"),
+        read_only=common.read_only_active(),
+        update_status=common.read_json(common.UPDATE_STATUS_PATH, None),
+        auto_update=cfg.get("auto_update", True),
         store_rows=[{"key": k, "label": common.STORE_LABELS[k],
                      "on": bool(cfg.get(f"send_to_{k}")),
                      "ready": (common.kroger_ready(cfg) if k == "kroger"
@@ -628,6 +656,8 @@ def save():
     kv = f.get("walmart_key_version", "").strip()
     if kv:
         updates["walmart_key_version"] = kv
+    if f.get("has_updates"):
+        updates["auto_update"] = f.get("auto_update") == "1"
     if f.get("has_rules"):
         if f.get("routing_rule") in {k for k, _, _ in RULE_OPTIONS}:
             updates["routing_rule"] = f["routing_rule"]
@@ -779,6 +809,32 @@ phone to your home WiFi and visit <b>http://tosslist.local</b> anytime
 to change settings.</p>
 <p>If it couldn't connect, the <b>Tosslist Setup</b> network comes back
 in about a minute so you can try again.</p></body></html>"""
+
+
+# ---------- Updates (issue #12) ----------
+
+def start_update():
+    """Run update.sh in the background, outside this service, because it
+    may restart the Pi. Replaced in tests."""
+    repo = common.app_file("REPO")
+    if not repo or not os.path.exists(os.path.join(repo, "update.sh")):
+        return False
+    subprocess.Popen(["systemd-run", "--no-block", "--unit", "tosslist-update-now",
+                      "--collect", "/bin/bash", os.path.join(repo, "update.sh")],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
+
+
+@app.route("/update/now", methods=["POST"])
+def update_now():
+    if start_update():
+        state["message"] = ("Checking for updates. If there's a new release, the Pi "
+                            "restarts twice and is back in about five minutes. "
+                            "Refresh this page to see the result.")
+    else:
+        state["error"] = ("Couldn't find Tosslist's copy from GitHub. Run the "
+                          "installer again over SSH.")
+    return redirect("/")
 
 
 # ---------- Walmart ----------

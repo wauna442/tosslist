@@ -66,6 +66,17 @@ QUEUE_PATH = os.path.join(DATA_DIR, "queue.json")
 CACHE_PATH = os.path.join(DATA_DIR, "cache.json")
 RECENT_PATH = os.path.join(DATA_DIR, "recent.json")
 KROGER_TOKEN_PATH = os.path.join(DATA_DIR, "kroger_token.json")
+UPDATE_STATUS_PATH = os.path.join(DATA_DIR, "update-status.json")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def app_file(name, default=""):
+    """VERSION and REPO, written next to the program by install.sh."""
+    try:
+        with open(os.path.join(APP_DIR, name)) as f:
+            return f.read().strip() or default
+    except OSError:
+        return default
 WALMART_KEY_PATH = os.path.join(DATA_DIR, "walmart_key.pem")
 WALMART_BASKET_PATH = os.path.join(DATA_DIR, "walmart_basket.json")
 
@@ -93,6 +104,8 @@ DEFAULT_CONFIG = {
     "store_order": ["kroger", "walmart"],
     "todoist_when": "always",         # always | fallback (only if no store took it)
     "kroger_low_counts": True,        # Fred Meyer "low stock" counts as in stock
+    # Updates (issue #12)
+    "auto_update": True,              # install new releases each night
 }
 
 log = logging.getLogger("tosslist")

@@ -69,14 +69,20 @@ if [ -z "${TOSSLIST_DRY_RUN:-}" ]; then
   echo "address=/#/10.42.0.1" > /etc/NetworkManager/dnsmasq-shared.d/tosslist-captive.conf
 fi
 
-echo "==> Setting Tosslist to start on every power-up"
-for unit in tosslist.service tosslist-setup.service tosslist-resume.service; do
-  run cp "$SRC/systemd/$unit" /etc/systemd/system/
+version="$(as_owner_git "$SRC" describe --tags --always 2>/dev/null || echo unknown)"
+# The settings page shows the version and offers "Update now" (issue #12).
+put_file "$version" "$APP/VERSION"
+put_file "$SRC" "$APP/REPO"
+
+echo "==> Setting Tosslist to start on every power-up, and check for updates nightly"
+for unit in tosslist.service tosslist-setup.service tosslist-resume.service \
+            tosslist-update.service tosslist-update.timer; do
+  put_file "$(sed "s#@REPO@#$SRC#g" "$SRC/systemd/$unit")" "/etc/systemd/system/$unit"
 done
 run systemctl daemon-reload
-run systemctl enable tosslist.service tosslist-setup.service tosslist-resume.service
+run systemctl enable tosslist.service tosslist-setup.service tosslist-resume.service \
+  tosslist-update.timer
 
-version="$(as_owner_git "$SRC" describe --tags --always 2>/dev/null || echo unknown)"
 write_status ok "Installed." "$version"
 
 if readonly_wanted; then
