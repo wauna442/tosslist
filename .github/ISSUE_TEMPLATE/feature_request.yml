@@ -1,0 +1,26 @@
+name: "💡 Feature request"
+description: A small improvement to something Tosslist already does.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        New stores or services, new dependencies, new kinds of saved credentials, or changes to
+        what Tosslist does by default need a **Proposal** instead (see GOVERNANCE.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the problem, not just the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you've tried or considered instead?

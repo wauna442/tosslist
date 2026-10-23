@@ -307,3 +307,15 @@ same patterns as the light.
 Product names come from **Open Food Facts** (open database, ODbL license) and
 **UPCitemdb**'s free tier. Fred Meyer data comes from the **Kroger Public API**, and Walmart data from the
 **Walmart Affiliate API**.
+
+---
+
+## Contributing and project rules
+
+Changes go through pull requests that the maintainer reviews, with automatic
+tests on each one. See [CONTRIBUTING.md](CONTRIBUTING.md) for how,
+[GOVERNANCE.md](GOVERNANCE.md) for who decides, and
+[CONSTITUTION.md](CONSTITUTION.md) for the principles every change follows —
+including that Tosslist never stores a password and never places an order.
+Security problems: [SECURITY.md](SECURITY.md). Release notes:
+[CHANGELOG.md](CHANGELOG.md).
