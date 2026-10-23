@@ -67,6 +67,29 @@ CACHE_PATH = os.path.join(DATA_DIR, "cache.json")
 RECENT_PATH = os.path.join(DATA_DIR, "recent.json")
 KROGER_TOKEN_PATH = os.path.join(DATA_DIR, "kroger_token.json")
 UPDATE_STATUS_PATH = os.path.join(DATA_DIR, "update-status.json")
+PIN_PATH = os.path.join(DATA_DIR, "pin.json")
+SECRET_PATH = os.path.join(DATA_DIR, "secret.key")
+
+
+def write_private(path, data):
+    """Write a small private file (owner-only), atomically."""
+    with writable():
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+
+def remove_file(path):
+    with writable():
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
