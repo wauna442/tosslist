@@ -26,6 +26,7 @@ from flask import Flask, Response, redirect, render_template_string, request, se
 import alerts
 import barcode
 import common
+import kinds
 import kroger
 import scanner
 import teach
@@ -653,6 +654,25 @@ PAGE = """<!doctype html>
   you're on "Every store", it also shows which store each other rule would
   have picked, so you can try a rule before switching.</p>
  </div>
+
+ <div class="card">
+  <h2>Kinds of items</h2>
+  <input type="hidden" name="has_kinds" value="1">
+  <label class="check" style="margin-top:0"><input type="checkbox" name="sort_by_kind" value="1"
+   {% if sort_by_kind %}checked{% endif %}><div>Sort your Todoist list into sections by kind
+   <span>Kinds are UPCitemdb's product categories; anything Open Food Facts knows is food.
+   Fix a wrong one with Teach in Recent scans.</span></div></label>
+  {% if kind_rows %}
+  <table style="margin-top:10px">{% for k in kind_rows %}<tr>
+   <td><input type="hidden" name="kind_{{ loop.index0 }}" value="{{ k.kind }}">
+    <b>{{ k.kind }}</b>
+    <label for="ks{{ loop.index0 }}" class="hint" style="margin:6px 0 2px;font-weight:400">Section name</label>
+    <input id="ks{{ loop.index0 }}" name="kind_section_{{ loop.index0 }}" value="{{ k.section }}">
+    <label class="check" style="margin-top:6px"><input type="checkbox" name="kind_stores_{{ loop.index0 }}" value="1"
+     {% if k.stores %}checked{% endif %}><div>Try Fred Meyer and Walmart<span>Off: only Todoist gets these.</span></div></label>
+   </td></tr>{% endfor %}</table>
+  {% else %}<p class="hint">Kinds appear here as you scan things.</p>{% endif %}
+ </div>
  {% endif %}
 
  <div class="card">
@@ -887,6 +907,8 @@ def index():
         routing_rule=cfg.get("routing_rule", "every"),
         kroger_low_counts=cfg.get("kroger_low_counts", True),
         todoist_when=cfg.get("todoist_when", "always"),
+        sort_by_kind=cfg.get("sort_by_kind", True),
+        kind_rows=kinds.listing(),
         send_to_walmart=cfg.get("send_to_walmart", False),
         walmart_ready=common.walmart_ready(cfg),
         walmart_consumer_id=cfg.get("walmart_consumer_id", ""),
@@ -939,6 +961,14 @@ def save():
     kv = f.get("walmart_key_version", "").strip()
     if kv:
         updates["walmart_key_version"] = kv
+    if f.get("has_kinds"):
+        updates["sort_by_kind"] = f.get("sort_by_kind") == "1"
+        changes, i = {}, 0
+        while f"kind_{i}" in f:
+            changes[f[f"kind_{i}"]] = {"section": f.get(f"kind_section_{i}", ""),
+                                       "stores": f.get(f"kind_stores_{i}") == "1"}
+            i += 1
+        kinds.update(changes)
     if f.get("has_updates"):
         updates["auto_update"] = f.get("auto_update") == "1"
         updates["send_alerts"] = f.get("send_alerts") == "1"
@@ -1223,6 +1253,11 @@ TEACH_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
  {% endif %}
  <label for="name">Name on your list</label>
  <input id="name" type="text" name="name" value="{{ name }}" maxlength="120" required>
+ <label for="kind">Which kind?</label>
+ <select id="kind" name="kind">
+  <option value="">Automatic{% if auto_kind %} ({{ auto_kind }}){% endif %}</option>
+  {% for k in kind_choices %}<option value="{{ k }}" {% if current and current.kind == k %}selected{% endif %}>{{ k }}</option>{% endfor %}
+ </select>
  <button>Save</button>
  <p class="hint">From now on, scanning this barcode uses this name{% if stores %} and the
  product you picked{% endif %}.</p>
@@ -1269,12 +1304,15 @@ document.getElementById('photo').addEventListener('change', function () {
 def _teach_page(barcode, **extra):
     cfg = common.load_config()
     current = teach.get(barcode)
+    cached = common.read_json(common.CACHE_PATH, {}).get(barcode)
     stores = " and ".join(n for n, ok in (("Fred Meyer", common.kroger_ready(cfg)),
                                          ("Walmart", common.walmart_ready(cfg))) if ok)
     values = dict(barcode=barcode, current=current, lines=[], photo_read=False,
                   query="", name=(current or {}).get("name", ""), results=None,
                   problems=[], error="", stores=stores,
-                  show_kroger=common.kroger_ready(cfg), show_walmart=common.walmart_ready(cfg))
+                  show_kroger=common.kroger_ready(cfg), show_walmart=common.walmart_ready(cfg),
+                  kind_choices=sorted(set(kinds.KNOWN) | {k["kind"] for k in kinds.listing()}),
+                  auto_kind=cached.get("kind") if isinstance(cached, dict) else None)
     values.update({k: v for k, v in extra.items() if v is not None})
     return render_template_string(TEACH_PAGE, **values)
 
@@ -1327,9 +1365,12 @@ def teach_save():
     if not code:
         return redirect("/")
     try:
+        kind = request.form.get("kind", "")
+        allowed = set(kinds.KNOWN) | {k["kind"] for k in kinds.listing()}
         entry = teach.remember(code, request.form.get("name", ""),
                                request.form.get("kroger_upc") or None,
-                               request.form.get("walmart_item_id") or None)
+                               request.form.get("walmart_item_id") or None,
+                               kind if kind in allowed else None)
     except ValueError:
         return _teach_page(code, error="Type a name for this item.")
     extra = [n for n, k in (("Fred Meyer", "kroger_upc"), ("Walmart", "walmart_item_id"))

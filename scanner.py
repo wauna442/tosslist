@@ -15,6 +15,7 @@ import requests
 
 import common
 import alerts
+import kinds
 import kroger
 import teach
 import walmart
@@ -69,7 +70,8 @@ class BarcodeDecoder:
 # ---------- barcode -> product name ----------
 
 def _off_lookup(barcode, session):
-    """Open Food Facts: free, no account needed. Best for food."""
+    """Open Food Facts: free, no account needed. Best for food.
+    Returns (name, kind) or None."""
     r = session.get(
         f"https://world.openfoodfacts.org/api/v2/product/{barcode}.json",
         params={"fields": "product_name,product_name_en,brands,quantity"},
@@ -87,12 +89,12 @@ def _off_lookup(barcode, session):
     brand = (p.get("brands") or "").split(",")[0].strip()
     if brand and brand.lower() not in name.lower():
         name = f"{brand} {name}"
-    return name
+    return name, kinds.FOOD
 
 
 def _upcitemdb_lookup(barcode, session):
     """UPCitemdb free tier (100 lookups/day, no account). Catches non-food
-    items like paper towels or soap."""
+    items like paper towels or soap. Returns (name, kind) or None."""
     r = session.get("https://api.upcitemdb.com/prod/trial/lookup",
                     params={"upc": barcode},
                     headers={"User-Agent": USER_AGENT}, timeout=8)
@@ -102,35 +104,46 @@ def _upcitemdb_lookup(barcode, session):
     items = r.json().get("items") or []
     if not items:
         return None
-    return (items[0].get("title") or "").strip() or None
+    name = (items[0].get("title") or "").strip()
+    return (name, kinds.from_category(items[0].get("category"))) if name else None
+
+
+def lookup_info(barcode, session=None):
+    """{"name", "kind"} for a barcode; either may be None if nobody knows it.
+    A taught name or kind always wins. Raises requests.RequestException if
+    there's no internet and the answer isn't already known."""
+    taught = teach.get(barcode) or {}
+    if taught.get("name") and taught.get("kind"):
+        return {"name": taught["name"], "kind": taught["kind"]}
+    cache = common.read_json(common.CACHE_PATH, {})
+    found = cache.get(barcode)
+    if isinstance(found, str):                  # cached by an older version
+        found = None
+    if found is None:
+        session = session or requests.Session()
+        network_error = None
+        for source in (_off_lookup, _upcitemdb_lookup):
+            try:
+                hit = source(barcode, session)
+            except requests.RequestException as e:
+                network_error = e
+                continue
+            if hit:
+                found = {"name": hit[0], "kind": hit[1]}
+                break
+        if found is None and network_error is not None and not taught.get("name"):
+            raise network_error
+        if found:
+            cache[barcode] = found
+            common.write_json(common.CACHE_PATH, cache)
+    found = found or {"name": None, "kind": None}
+    return {"name": taught.get("name") or found["name"],
+            "kind": taught.get("kind") or found["kind"]}
 
 
 def lookup_product(barcode, session=None):
-    """Returns a product name, or None if nobody knows this barcode.
-    Raises requests.RequestException if there's no internet."""
-    taught = teach.get(barcode)              # you taught it a name (issue #9)
-    if taught:
-        return taught["name"]
-    session = session or requests.Session()
-    cache = common.read_json(common.CACHE_PATH, {})
-    if barcode in cache:
-        return cache[barcode]
-    network_error = None
-    name = None
-    for source in (_off_lookup, _upcitemdb_lookup):
-        try:
-            name = source(barcode, session)
-        except requests.RequestException as e:
-            network_error = e
-            continue
-        if name:
-            break
-    if name is None and network_error is not None:
-        raise network_error
-    if name:
-        cache[barcode] = name
-        common.write_json(common.CACHE_PATH, cache)
-    return name
+    """Returns a product name, or None if nobody knows this barcode."""
+    return lookup_info(barcode, session)["name"]
 
 
 # ---------- Todoist ----------
@@ -185,10 +198,25 @@ class TodoistClient:
         tasks = self._get_all("/tasks", {"project_id": project_id})
         return {t.get("content", "").strip().lower() for t in tasks}
 
+    def section_id(self, project_id, name):
+        """The section with this name in the list, creating it if needed."""
+        key = (project_id, name.strip().lower())
+        cache = self.__dict__.setdefault("_sections", {})
+        if key not in cache:
+            for sec in self._get_all("/sections", {"project_id": project_id}):
+                cache[(project_id, sec.get("name", "").strip().lower())] = sec["id"]
+        if key not in cache:
+            sec = self._request("POST", "/sections",
+                                json={"name": name.strip(), "project_id": project_id})
+            cache[key] = sec["id"]
+        return cache[key]
+
     def add_task(self, project_id, content, description="", request_id=None,
-                 priority=None, due_string=None):
+                 priority=None, due_string=None, section_id=None):
         body = {"content": content, "project_id": project_id,
                 "description": description}
+        if section_id:
+            body["section_id"] = section_id
         if priority:
             body["priority"] = priority          # 4 = p1, Todoist's highest
         if due_string:
@@ -248,8 +276,11 @@ def _todoist(item, cfg, todoist_factory):
     if cfg.get("skip_duplicates", True):
         if item["name"].strip().lower() in client.open_task_names(pid):
             return "duplicate"
+    section = None
+    if cfg.get("sort_by_kind", True) and item.get("kind"):       # issue #24
+        section = client.section_id(pid, kinds.settings(item["kind"])["section"])
     task = client.add_task(pid, item["name"], f"Barcode: {item['barcode']}",
-                           request_id=item["id"])
+                           request_id=item["id"], section_id=section)
     item["todoist_task_id"] = (task or {}).get("id")       # for undo (issue #8)
     return "added"
 
@@ -379,6 +410,17 @@ def _route(item, cfg, stores, results):
         return
 
 
+def _session_for(cfg, todoist_factory, kroger_factory, walmart_factory):
+    """One web session for the product lookups, shared with the clients this
+    scan uses (so tests can supply fake services in one place)."""
+    if todoist_factory:
+        return todoist_factory(cfg.get("todoist_token", "")).session
+    for factory in (kroger_factory, walmart_factory):
+        if factory:
+            return factory(cfg).session
+    return requests.Session()
+
+
 def send_item(item, cfg, todoist_factory=None, kroger_factory=None,
               walmart_factory=None):
     """Work through the scan's pending steps. Records results in
@@ -390,6 +432,19 @@ def send_item(item, cfg, todoist_factory=None, kroger_factory=None,
     if taught and not item.get("name"):
         item["name"] = taught["name"]
     results = item.setdefault("results", {})
+    if "kind" not in item:                      # issue #24: what kind of item?
+        info = lookup_info(item["barcode"],     # no internet -> waits in the queue
+                           _session_for(cfg, todoist_factory, kroger_factory, walmart_factory))
+        item["kind"] = info["kind"]
+        if info["name"] and not item.get("name"):
+            item["name"] = info["name"]
+        kinds.seen(item["kind"])
+        if (item["kind"] and cfg.get("sort_by_kind", True)
+                and not kinds.settings(item["kind"])["stores"]):
+            dropped = [st for st in item["pending"] if st in STORES or st == "route"]
+            if dropped:
+                item["pending"] = [st for st in item["pending"] if st not in dropped]
+                item["stores_skipped"] = True
     stores = _Stores(cfg, kroger_factory, walmart_factory)
     steps = [st for st in item["pending"] if st in STORES]
     steps += [st for st in item["pending"] if st == "route"]
@@ -435,6 +490,8 @@ def _store_text(item, s, code):
 def summarize(item):
     results = item.get("results", {})
     parts = []
+    if item.get("kind"):
+        parts.append(item["kind"] + (" (stores off)" if item.get("stores_skipped") else ""))
     if "todoist" in results:
         parts.append(f"Todoist: {RESULT_TEXT[results['todoist']]}")
     order = item.get("route_stores") or list(STORES)

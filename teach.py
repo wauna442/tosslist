@@ -37,7 +37,7 @@ def get(barcode):
     return taught().get(barcode)
 
 
-def remember(barcode, name, kroger_upc=None, walmart_item_id=None):
+def remember(barcode, name, kroger_upc=None, walmart_item_id=None, kind=None):
     barcode = clean_barcode(barcode)
     name = clean_name(name)
     if not barcode or not name:
@@ -47,6 +47,10 @@ def remember(barcode, name, kroger_upc=None, walmart_item_id=None):
         entry["kroger_upc"] = kroger_upc
     if walmart_item_id and walmart_item_id.isdigit():
         entry["walmart_item_id"] = walmart_item_id
+    if kind:
+        entry["kind"] = kind[:60]
+        import kinds
+        kinds.seen(entry["kind"])
     data = taught()
     data[barcode] = entry
     common.write_json(TAUGHT_PATH, data)
