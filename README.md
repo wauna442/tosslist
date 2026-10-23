@@ -102,9 +102,12 @@ What they do:
 
 1. On your phone or computer (on your home WiFi), open
    **http://tosslist.local**
-2. Paste your **API token**.
-3. Keep the list name **Grocery List** or change it. Tap **Save**.
-4. Scan something. The green light on the Pi blinks twice, and the item
+2. **Create a PIN** (4 to 8 digits). It keeps guests on your WiFi from
+   changing settings. Then tap **Print the PIN reset card** (in the PIN
+   section) and keep the printout somewhere safe.
+3. Paste your **API token**.
+4. Keep the list name **Grocery List** or change it. Tap **Save**.
+5. Scan something. The green light on the Pi blinks twice, and the item
    appears in Todoist under that list.
 
 **Share the list with your partner:** in the Todoist app, open the list →
@@ -247,6 +250,23 @@ On **http://tosslist.local**, under **Store order and rules**:
   Fred Meyer's are for the store you picked.
 - **"Stock not reported"** counts as in stock: if a store doesn't say, it's
   treated as having it.
+
+---
+
+## Settings PIN
+
+Changing settings needs your PIN. After you enter it, that phone or computer
+stays unlocked for 30 minutes (or tap **Lock settings now**). Recent scans and
+the Walmart list stay open to everyone in the house without a PIN.
+
+- **Wrong PIN five times** locks entry for 5 minutes.
+- **Change it** under **PIN → Change PIN**. Other phones that were unlocked
+  are signed out.
+- **Forgot it?** Scan your printed **PIN reset card** with Tosslist's scanner.
+  The light blinks twice, and the settings page asks you to create a new
+  PIN. Keep the card away from the device: anyone with the card and the
+  scanner can reset the PIN. You can print it again any time from
+  **PIN → Print the PIN reset card**.
 
 ---
 
